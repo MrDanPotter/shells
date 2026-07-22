@@ -1,0 +1,16 @@
+{
+  "name": "shells",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Barebones skeleton for driving a Claude Code session from an arbitrary external front end using only lifecycle hooks and the filesystem.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "doctor": "node doctor.js",
+    "reference": "node reference/server.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/session-start.js" }] }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node kernel/hooks/activity-hook.js UserPromptSubmit" },
+          { "type": "command", "command": "node kernel/hooks/gate.js prompt" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js PostToolUse", "async": true }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js SubagentStart", "async": true }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js SubagentStop", "async": true }] }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node kernel/hooks/activity-hook.js Stop" },
+          { "type": "command", "command": "node kernel/hooks/gate.js stop" }
+        ]
+      }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js PreCompact" }] }
+    ],
+    "PostCompact": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js PostCompact" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js SessionEnd" }] }
+    ]
+  }
+}
