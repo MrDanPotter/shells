@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="./assets/banner-beach.png" alt="shells">
+</div>
+
 # shells
 
 A barebones skeleton for driving a Claude Code session from an arbitrary
@@ -7,6 +11,10 @@ The pattern this repo demonstrates, in one sentence: **a Claude Code session can
 be driven by, and report to, any front end you build, using only hooks and files
 as the wire.** No beads, no database, no network dependency, no Windows-only
 code. Clone it, read it in an afternoon, build your own front end on top.
+
+<div align="center">
+  <img src="./assets/shell-row-1.png" alt="shells">
+</div>
 
 ## Quick start
 
@@ -21,7 +29,7 @@ is no `npm install` step, ever, by design (see protocol.md's closing note on why
 Then, to see it work end to end:
 
 ```bash
-node reference/server.js     # -> http://127.0.0.1:4390, a deliberately plain demo UI
+node reference/server.js     # -> http://127.0.0.1:4420, a styled, live-polling demo UI
 ```
 
 Open a Claude Code session in this folder (`.claude/settings.json` is already
@@ -34,7 +42,7 @@ echo '{"title":"pick a cache format","chosen":"flat JSON file","options":["flat 
   | node store/cli.js new decision
 ```
 
-Reply to it from `http://127.0.0.1:4390/`, and — if the session is mid-turn — the
+Reply to it from `http://127.0.0.1:4420/`, and — if the session is mid-turn — the
 reply reaches it within seconds via the Stop-hook trick described in
 `kernel/hooks/gate.js`. If it's idle, the reply is waiting on its next turn, or
 delivered immediately if the watcher is armed.
@@ -84,9 +92,11 @@ doctor.js                 TIER 1 — fires every hook, asserts the effect, check
    different backend later and nothing else in the repo needs to change.
 4. **Protocol** (`protocol.md`, `reference/server.js`) — the actual deliverable.
    Someone should be able to build their own front end reading `protocol.md`
-   ALONE, without ever opening `kernel/`. The reference server is proof that
-   contract works, not something to build on — it's deliberately plain and meant
-   to be thrown away.
+   ALONE, without ever opening `kernel/`. The reference server is proof that the
+   contract works and a worked example of protocol.md's "bruises" (safe escaping,
+   not clobbering unsaved input, honest staleness) — it's styled and live-polling
+   so you can actually watch the agent talk back, but it's still a reference to
+   diff your own front end against, not a base to build on.
 
 ## Wiring hooks into your own project
 
@@ -112,6 +122,10 @@ answered/done messages), and the watcher's live/queued/offline classification �
 including the case where nothing is armed at all, which is the actual failure
 mode this pattern is exposed to: it fails **silently**, so the doctor has to check
 for it explicitly rather than assume it away.
+
+<div align="center">
+  <img src="./assets/shell-row-2.png" alt="shells">
+</div>
 
 ## What this kit deliberately does not do
 

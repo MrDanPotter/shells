@@ -111,7 +111,7 @@ shell out to from any language.
 
 ### 2b. Through the reference HTTP server
 
-`node reference/server.js` (default `http://127.0.0.1:4390`, override with
+`node reference/server.js` (default `http://127.0.0.1:4420`, override with
 `PORT=`). Binds to `127.0.0.1` only — **never expose this off the machine it runs
 on.** It has no auth and shells out to nothing but the local file store, which is
 exactly the trust boundary of "one user, one machine."

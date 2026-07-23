@@ -3,8 +3,19 @@
 
 // SessionStart hook — printed into context at the start of every session.
 //
-// Its whole job is to tell the model to arm the keep-alive watcher
-// (watcher/watch-inbox.js). This handshake is unavoidable, not a design shortcut:
+// It does two things, both of which have to happen from inside the model's own
+// context or they silently don't happen at all:
+//
+//   1. Arm the keep-alive watcher, so inbound messages reach an idle session.
+//   2. Put the agent on the bidirectional contract from turn one: the FRONT END is
+//      the interface, so anything the user needs to see/decide/act on gets pushed as
+//      a message through the store — not left in this chat stream. Without this line
+//      here, that rule only exists in contract/CLAUDE.fragment.md, which a project
+//      may never have pasted into a CLAUDE.md — so a fresh session talks back only in
+//      the terminal and the front end stays empty, which is exactly the "you can't
+//      send me messages in the webapp" gap this kit exists to close.
+//
+// Point (1)'s handshake is unavoidable, not a design shortcut:
 //
 //   - A long-running "watch and notify" process in this harness (a Monitor) is
 //     SESSION-SCOPED. It dies when the session ends.
@@ -44,7 +55,18 @@ try {
     '      timeout_ms: 3600000',
     '    })',
     '',
-    'Do this once, early in the session.'
+    'Do this once, early in the session.',
+    '',
+    '[shells] The front end — not this chat stream — is the interface. From your first',
+    'turn on, surface anything the user needs to see, decide, or act on as a MESSAGE',
+    'through the store, and keep chat to a one-line pointer at it:',
+    '',
+    "    echo '{\"title\":\"…\",\"body\":\"…\"}' | node store/cli.js new notification",
+    '',
+    'Four kinds — decision (needs a reply; must include "chosen", the default you',
+    'already took), task (a human must do it by hand), knowledge (worth re-reading),',
+    'notification (just reporting what you did). End every turn having pushed at least',
+    'one. Full routing rules: contract/CLAUDE.fragment.md.'
   ];
   if (queued) {
     lines.push('', `${queued} inbox message(s) are already queued and will arrive once it is armed.`);
