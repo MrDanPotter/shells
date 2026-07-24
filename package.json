@@ -7,7 +7,12 @@
   "engines": {
     "node": ">=18"
   },
+  "bin": {
+    "create-shells": "bin/create-shells.js"
+  },
   "files": [
+    "bin",
+    "lib",
     "shells.js",
     "kernel",
     "watcher",
@@ -18,7 +23,8 @@
   ],
   "scripts": {
     "doctor": "node doctor.js",
-    "reference": "node reference/server.js"
+    "reference": "node reference/server.js",
+    "scaffold": "node bin/create-shells.js"
   },
   "dependencies": {},
   "devDependencies": {}
