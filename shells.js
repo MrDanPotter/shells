@@ -92,16 +92,21 @@ switch (area) {
     break;
   }
 
-  case 'update':
+  case 'update': {
+    const fs = require('fs');
+    let cur = '';
+    try { const s = JSON.parse(fs.readFileSync(path.join(__dirname, '.shells-version'), 'utf8')); cur = ` (this install is ${s.version})`; } catch { /* no stamp */ }
     process.stdout.write([
-      'To update the vendored kit, re-run the scaffolder from the project root:',
+      `Update the vendored kit${cur} by re-running the scaffolder from the project root:`,
       '',
       '  npx create-shells --force',
       '',
-      'That re-copies the kit into this directory from the latest published version,',
-      'leaving your .claude/settings.json, CLAUDE.md, and state/ untouched.'
+      'That re-copies the kit here from the latest published version — your',
+      '.claude/settings.json, CLAUDE.md, and .shells/state/ are left untouched',
+      '(state and wiring are not part of the copied kit).'
     ].join('\n') + '\n');
     break;
+  }
 
   default:
     fail(USAGE);

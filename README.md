@@ -100,23 +100,45 @@ doctor.js                 TIER 1 — fires every hook, asserts the effect, check
    so you can actually watch the agent talk back, but it's still a reference to
    diff your own front end against, not a base to build on.
 
-## Wiring hooks into your own project
+## Adding shells to your own project
 
-Copy `.claude/settings.json`'s `hooks` block into your project's own
-`.claude/settings.json` (merge if one already exists), and copy `shells.js`
-alongside `kernel/`, `watcher/`, and `store/`. Every hook command goes through the
-single `shells.js` entrypoint (`node shells.js hook activity ...`,
-`node shells.js hook gate ...`) rather than naming an internal file — so the
-internals can be relocated or bundled without touching your `settings.json`. The
-commands are written as relative paths because Claude Code runs hooks with the
-project root as the working directory — no absolute paths, no platform-specific
-separators, so the same `settings.json` works unmodified on any OS.
+From inside your project, run the scaffolder:
 
-This hand-wiring is what the planned `create-shells` scaffolder will automate; see
-[`docs/scaffolder-plan.md`](docs/scaffolder-plan.md).
+```bash
+npx create-shells            # add shells to the current project
+npx create-shells my-app     # or scaffold a new project directory
+```
 
-For a full primer on how the pieces fit together, plus options for packaging shells
-as a self-contained install (a scaffolder, an npm package, and more), see
+It vendors the kit into `.shells/` and wires exactly three thin touch-points into
+your project — nothing else:
+
+```
+.shells/                     all of shells' code + runtime state, sealed behind shells.js
+.claude/settings.json        hooks block merged in (yours preserved), each -> .shells/shells.js
+CLAUDE.md                    one line appended: @.shells/contract/CLAUDE.fragment.md
+.gitignore                   one line appended: .shells/state/
+```
+
+Every hook command goes through the single `.shells/shells.js` entrypoint rather
+than naming an internal file, so the internals can be updated or relocated without
+touching your `settings.json`. Re-running is idempotent. Add `--with-demo` to also
+vendor the reference UI; `--dry-run` to preview.
+
+Then, from inside the install:
+
+```bash
+node .shells/shells.js doctor    # verify the wiring fires correctly
+node .shells/shells.js version   # what kit version is vendored
+node .shells/shells.js init      # re-apply the wiring if it drifts
+npx create-shells --force        # pull a newer kit (state + wiring untouched)
+```
+
+Prefer to wire it by hand instead? Copy `shells.js` alongside `kernel/`, `watcher/`,
+`store/`, and `contract/`, then add the hook block from `.claude/settings.json`
+(each command `node <dir>/shells.js hook ...`). The scaffolder just automates this.
+
+For a full primer on how the pieces fit together and the packaging design, see
+[`docs/scaffolder-plan.md`](docs/scaffolder-plan.md) and
 [`docs/packaging.md`](docs/packaging.md).
 
 ## Running the doctor
