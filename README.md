@@ -39,7 +39,7 @@ agent side and watch it show up:
 
 ```bash
 echo '{"title":"pick a cache format","chosen":"flat JSON file","options":["flat JSON file","SQLite"],"rationale":"zero deps"}' \
-  | node store/cli.js new decision
+  | node shells.js store new decision
 ```
 
 Reply to it from `http://127.0.0.1:4420/`, and — if the session is mid-turn — the
@@ -50,6 +50,7 @@ delivered immediately if the watcher is armed.
 ## Layout
 
 ```
+shells.js                 TIER 1 — the ONE entrypoint: hook | watch | store subcommands
 CLAUDE.md                 dogfoods the contract on this repo (imports the fragment)
 .claude/settings.json     hook wiring for THIS repo (dogfoods the kit on itself)
 contract/
@@ -102,12 +103,17 @@ doctor.js                 TIER 1 — fires every hook, asserts the effect, check
 ## Wiring hooks into your own project
 
 Copy `.claude/settings.json`'s `hooks` block into your project's own
-`.claude/settings.json` (merge if one already exists), and copy `kernel/`,
-`watcher/`, and `store/` alongside it. Hook commands here are written as relative
-paths (`node kernel/hooks/activity-hook.js ...`) because Claude Code runs hooks
-with the project root as the working directory — no absolute paths, no
-platform-specific separators, so the same `settings.json` works unmodified on
-any OS.
+`.claude/settings.json` (merge if one already exists), and copy `shells.js`
+alongside `kernel/`, `watcher/`, and `store/`. Every hook command goes through the
+single `shells.js` entrypoint (`node shells.js hook activity ...`,
+`node shells.js hook gate ...`) rather than naming an internal file — so the
+internals can be relocated or bundled without touching your `settings.json`. The
+commands are written as relative paths because Claude Code runs hooks with the
+project root as the working directory — no absolute paths, no platform-specific
+separators, so the same `settings.json` works unmodified on any OS.
+
+This hand-wiring is what the planned `create-shells` scaffolder will automate; see
+[`docs/scaffolder-plan.md`](docs/scaffolder-plan.md).
 
 For a full primer on how the pieces fit together, plus options for packaging shells
 as a self-contained install (a scaffolder, an npm package, and more), see

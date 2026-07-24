@@ -44,8 +44,12 @@ function check(name, cond, detail) {
   if (!cond) process.stderr.write(`FAIL: ${name}${detail ? ` — ${detail}` : ''}\n`);
 }
 
-function runHook(relPath, args, stdinObj) {
-  const r = spawnSync(process.execPath, [path.join(ROOT, relPath), ...(args || [])], {
+// Invoke through the shells.js dispatcher — the SAME entrypoint the live session's
+// .claude/settings.json uses. Testing the dispatcher path (not the internal scripts
+// directly) is the point: a break in routing would otherwise pass here and only fail
+// in a real session.
+function runShells(args, stdinObj) {
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'shells.js'), ...(args || [])], {
     cwd: ROOT,
     env: process.env,
     input: stdinObj !== undefined ? JSON.stringify(stdinObj) : undefined,
@@ -57,9 +61,32 @@ function runHook(relPath, args, stdinObj) {
 
 function activity() { return readJson(activityFile(), {}); }
 
+// --- Phase 1: the kit surface (lib/manifest.js) -----------------------------
+// manifest.js is the single source of truth for what the kit IS: the scaffolder
+// vendors exactly `manifest.kit`, and package.json "files" mirrors it. These checks
+// are the tripwire that the three never drift — a kit file added but left out of the
+// manifest (or the tarball) would otherwise ship a broken install, silently.
+//
+// DEV-REPO ONLY: a vendored .shells/ install copies just `manifest.kit`, so it has
+// neither lib/manifest.js nor a package.json. Skip cleanly there rather than crash —
+// doctor.js itself ships in the kit and must run in both places.
+if (fs.existsSync(path.join(ROOT, 'lib', 'manifest.js'))) {
+  const manifest = require('./lib/manifest');
+  for (const p of [...manifest.kit, ...manifest.demo]) {
+    check(`manifest: path exists on disk — ${p}`, fs.existsSync(path.join(ROOT, p)), p);
+  }
+  const pkg = readJson(path.join(ROOT, 'package.json'), null);
+  if (pkg && Array.isArray(pkg.files)) {
+    const files = new Set(pkg.files);
+    for (const p of manifest.kit) {
+      check(`manifest: package.json "files" carries ${p}`, files.has(p), p);
+    }
+  }
+}
+
 // --- Tier 1: activity-hook.js, one event at a time -------------------------
 
-runHook('kernel/hooks/activity-hook.js', ['UserPromptSubmit'], { session_id: 'doctor', prompt: '  hello   world  ' });
+runShells(['hook', 'activity', 'UserPromptSubmit'], { session_id: 'doctor', prompt: '  hello   world  ' });
 {
   const a = activity();
   check('UserPromptSubmit sets state=working', a.state === 'working', JSON.stringify(a.state));
@@ -68,28 +95,28 @@ runHook('kernel/hooks/activity-hook.js', ['UserPromptSubmit'], { session_id: 'do
   check('UserPromptSubmit records turn_started', typeof a.turn_started === 'string' && a.turn_started.length > 0);
 }
 
-runHook('kernel/hooks/activity-hook.js', ['PostToolUse'], { tool_name: 'Read' });
+runShells(['hook', 'activity', 'PostToolUse'], { tool_name: 'Read' });
 {
   const a = activity();
   check('PostToolUse bumps tool_count', a.tool_count === 1, JSON.stringify(a.tool_count));
   check('PostToolUse records last_tool', a.last_tool === 'Read', a.last_tool);
 }
 
-runHook('kernel/hooks/activity-hook.js', ['PostToolUse'], { tool_name: 'Task', tool_input: { description: 'do the thing' } });
+runShells(['hook', 'activity', 'PostToolUse'], { tool_name: 'Task', tool_input: { description: 'do the thing' } });
 {
   const a = activity();
   check('PostToolUse bumps tool_count again', a.tool_count === 2, JSON.stringify(a.tool_count));
   check('PostToolUse(Task) records subtask', a.subtask === 'do the thing', a.subtask);
 }
 
-runHook('kernel/hooks/activity-hook.js', ['SubagentStart']);
-runHook('kernel/hooks/activity-hook.js', ['SubagentStart']);
+runShells(['hook', 'activity', 'SubagentStart']);
+runShells(['hook', 'activity', 'SubagentStart']);
 check('SubagentStart increments twice', activity().subagents === 2, JSON.stringify(activity().subagents));
 
-runHook('kernel/hooks/activity-hook.js', ['SubagentStop']);
+runShells(['hook', 'activity', 'SubagentStop']);
 check('SubagentStop decrements', activity().subagents === 1, JSON.stringify(activity().subagents));
 
-runHook('kernel/hooks/activity-hook.js', ['PreCompact'], { trigger: 'auto' });
+runShells(['hook', 'activity', 'PreCompact'], { trigger: 'auto' });
 {
   const a = activity();
   check('PreCompact sets state=compacting', a.state === 'compacting', a.state);
@@ -97,7 +124,7 @@ runHook('kernel/hooks/activity-hook.js', ['PreCompact'], { trigger: 'auto' });
   check('PreCompact records the trigger', a.compact_trigger === 'auto', a.compact_trigger);
 }
 
-runHook('kernel/hooks/activity-hook.js', ['PostCompact']);
+runShells(['hook', 'activity', 'PostCompact']);
 {
   const a = activity();
   check('PostCompact resumes the interrupted state', a.state === 'working', a.state);
@@ -105,20 +132,20 @@ runHook('kernel/hooks/activity-hook.js', ['PostCompact']);
   check('PostCompact records compact_ended', typeof a.compact_ended === 'string');
 }
 
-runHook('kernel/hooks/activity-hook.js', ['Stop']);
+runShells(['hook', 'activity', 'Stop']);
 {
   const a = activity();
   check('Stop sets state=idle', a.state === 'idle', a.state);
   check('Stop resets subagents', a.subagents === 0, JSON.stringify(a.subagents));
 }
 
-runHook('kernel/hooks/activity-hook.js', ['SessionEnd']);
+runShells(['hook', 'activity', 'SessionEnd']);
 check('SessionEnd sets state=ended (distinct from idle)', activity().state === 'ended', activity().state);
 
 {
-  const r = runHook('kernel/hooks/session-start.js', []);
+  const r = runShells(['hook', 'session-start']);
   check('SessionStart tells the model to arm the watcher',
-    /Monitor\(/.test(r.stdout) && /watch-inbox\.js/.test(r.stdout),
+    /Monitor\(/.test(r.stdout) && /shells\.js watch/.test(r.stdout),
     r.stdout.slice(0, 80));
 }
 
@@ -188,20 +215,20 @@ check('store: markRead() closes a one-way kind', store.get(knowledgeId).status =
 // both are in listAwaiting() right now.
 
 {
-  const r1 = runHook('kernel/hooks/gate.js', ['prompt']);
+  const r1 = runShells(['hook', 'gate', 'prompt']);
   check('gate prompt-mode surfaces awaiting items', r1.stdout.includes(decisionId) && r1.stdout.includes(taskId));
-  const r2 = runHook('kernel/hooks/gate.js', ['prompt']);
+  const r2 = runShells(['hook', 'gate', 'prompt']);
   check('gate prompt-mode is safe to repeat (no guard needed — non-blocking)', r2.stdout.includes(decisionId));
 }
 
 {
-  const r1 = runHook('kernel/hooks/gate.js', ['stop']);
+  const r1 = runShells(['hook', 'gate', 'stop']);
   let parsed = null;
   try { parsed = JSON.parse(r1.stdout); } catch { /* not JSON */ }
   check('gate stop-mode chains the turn on first sight of an awaiting item',
     parsed && parsed.decision === 'block' && parsed.reason.includes(decisionId), r1.stdout.slice(0, 200));
 
-  const r2 = runHook('kernel/hooks/gate.js', ['stop']);
+  const r2 = runShells(['hook', 'gate', 'stop']);
   check('gate stop-mode loop guard: does NOT re-block the same unresolved item',
     r2.stdout.trim() === '', JSON.stringify(r2.stdout));
 }
@@ -211,7 +238,7 @@ store.resolve(taskId);
 const taskId2 = store.create({ kind: 'task', title: 'a second, later reply' });
 store.respond(taskId2, { verdict: 'done' });
 {
-  const r = runHook('kernel/hooks/gate.js', ['stop']);
+  const r = runShells(['hook', 'gate', 'stop']);
   let parsed = null;
   try { parsed = JSON.parse(r.stdout); } catch { /* not JSON */ }
   check('gate stop-mode loop guard is pruned on resolve, so a later reply chains again',
@@ -224,7 +251,7 @@ store.resolve(taskId2);
 fs.mkdirSync(inboxDir(), { recursive: true });
 atomicWrite(path.join(inboxDir(), '0001-doctor.json'), JSON.stringify({ id: 'doctor-msg', text: 'hello from the front end' }));
 {
-  const r = runHook('kernel/hooks/gate.js', ['stop']);
+  const r = runShells(['hook', 'gate', 'stop']);
   let parsed = null;
   try { parsed = JSON.parse(r.stdout); } catch { /* not JSON */ }
   check('gate stop-mode delivers an inbox message', parsed && parsed.decision === 'block' && parsed.reason.includes('hello from the front end'));
@@ -232,7 +259,7 @@ atomicWrite(path.join(inboxDir(), '0001-doctor.json'), JSON.stringify({ id: 'doc
     fs.readdirSync(inboxDir()).filter(f => f.endsWith('.json')).length === 0);
 }
 {
-  const r = runHook('kernel/hooks/gate.js', ['stop']);
+  const r = runShells(['hook', 'gate', 'stop']);
   check('gate stop-mode has nothing left to deliver a second time', r.stdout.trim() === '', JSON.stringify(r.stdout));
 }
 
@@ -258,7 +285,7 @@ check('watcher: a stale heartbeat correctly downgrades from "live" back to "queu
 // --- Tier 1: a REAL watcher process, end to end -----------------------------
 
 try { fs.rmSync(watcherFile(), { force: true }); } catch { /* fine */ }
-const child = spawn(process.execPath, [path.join(ROOT, 'watcher', 'watch-inbox.js'), '100'], {
+const child = spawn(process.execPath, [path.join(ROOT, 'shells.js'), 'watch', '100'], {
   cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'ignore']
 });
 let childOut = '';

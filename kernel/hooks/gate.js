@@ -45,8 +45,9 @@
 //       pruned of any id that has left the awaiting list (resolved, or answered
 //       again), so a later reply on the same message chains again.
 //
-//   node gate.js prompt     UserPromptSubmit — plain stdout injection, never blocks
-//   node gate.js stop       Stop — may emit {"decision":"block",...} to chain the turn
+// Wired through the shells.js dispatcher; the mode is the first argument:
+//   node shells.js hook gate prompt     UserPromptSubmit — plain stdout injection, never blocks
+//   node shells.js hook gate stop       Stop — may emit {"decision":"block",...} to chain the turn
 
 const fs = require('fs');
 const path = require('path');
@@ -54,8 +55,6 @@ const { atomicWrite, readJson } = require('../lib/atomic');
 const { inboxDir, deliveredFile } = require('../lib/paths');
 const { patchActivity } = require('../lib/activity');
 const store = require('../../store/store');
-
-const mode = process.argv[2] || 'prompt';
 
 // One line, trimmed — matches the style used for the activity header.
 function tidy(text, max = 160) {
@@ -99,7 +98,7 @@ function describe(awaiting, inboxMsgs) {
       out.push(`- ${m.kind.toUpperCase()} ${m.id} ${JSON.stringify(m.title)}`);
       out.push(`    verdict: ${m.verdict}${m.chosen ? `  (you had chosen ${JSON.stringify(m.chosen)})` : ''}`);
       if (m.response) out.push(`    reply: ${JSON.stringify(m.response)}`);
-      out.push(`    when applied: node store/cli.js resolve ${m.id}`);
+      out.push(`    when applied: node shells.js store resolve ${m.id}`);
     }
   }
   if (inboxMsgs.length) {
@@ -110,65 +109,73 @@ function describe(awaiting, inboxMsgs) {
   return out.join('\n');
 }
 
-try {
-  const awaiting = store.listAwaiting();
-  const inboxMsgs = drainInbox();
+// argv[0] is the mode ('prompt' | 'stop'). Exported as run() for the shells.js
+// dispatcher; the guard at the bottom keeps it runnable standalone too.
+function run(argv) {
+  const mode = argv[0] || 'prompt';
+  try {
+    const awaiting = store.listAwaiting();
+    const inboxMsgs = drainInbox();
 
-  if (mode !== 'stop') {
-    // Non-blocking context injection. Safe to repeat on every single prompt — this
-    // is exactly why awaiting items need NO loop guard here, only in stop mode.
-    if (awaiting.length || inboxMsgs.length) {
-      process.stdout.write(describe(awaiting, inboxMsgs) + '\n');
-      const first = inboxMsgs[0];
-      if (first) patchActivity({ task: tidy(first.text), task_source: 'inbox', task_at: new Date().toISOString() });
+    if (mode !== 'stop') {
+      // Non-blocking context injection. Safe to repeat on every single prompt — this
+      // is exactly why awaiting items need NO loop guard here, only in stop mode.
+      if (awaiting.length || inboxMsgs.length) {
+        process.stdout.write(describe(awaiting, inboxMsgs) + '\n');
+        const first = inboxMsgs[0];
+        if (first) patchActivity({ task: tidy(first.text), task_source: 'inbox', task_at: new Date().toISOString() });
+      }
+      process.exit(0);
     }
-    process.exit(0);
+
+    // --- stop mode -----------------------------------------------------------
+    const delivered = loadDelivered();
+    const present = new Set(awaiting.map(m => `${m.id}@${m.responded_at}`));
+
+    // Prune tokens that left the awaiting set (resolved, or a later reply that changed
+    // responded_at) so a fresh reply on the same message can chain again.
+    let pruned = false;
+    for (const token of [...delivered]) {
+      if (!present.has(token)) { delivered.delete(token); pruned = true; }
+    }
+
+    const freshAwaiting = awaiting.filter(m => !delivered.has(`${m.id}@${m.responded_at}`));
+
+    // Inbox messages always chain — they were just deleted above, so there is nothing
+    // to guard against re-delivering.
+    if (!freshAwaiting.length && !inboxMsgs.length) {
+      if (pruned) saveDelivered(delivered);
+      process.exit(0);
+    }
+
+    for (const m of freshAwaiting) delivered.add(`${m.id}@${m.responded_at}`);
+    saveDelivered(delivered);
+
+    // The Stop activity hook (which runs before this one — see .claude/settings.json)
+    // has already flipped the state to idle. Blocking means the turn keeps going, so
+    // put it back to working or the front end's spinner lies for the rest of the turn.
+    const first = inboxMsgs[0];
+    patchActivity({
+      state: 'working',
+      last_event: new Date().toISOString(),
+      task: tidy(first ? first.text : `reply on ${freshAwaiting[0].id}: ${freshAwaiting[0].title}`),
+      task_source: 'inbound',
+      task_at: new Date().toISOString(),
+      subtask: ''
+    });
+
+    process.stdout.write(JSON.stringify({
+      decision: 'block',
+      reason: describe(freshAwaiting, inboxMsgs)
+        + '\n\nThis arrived from the front end while you were working. Handle it now '
+        + 'rather than ending the turn.'
+    }));
+  } catch {
+    // Never block a turn on gate trouble — silent failure here beats an unrelated
+    // outage taking down every prompt in the workspace.
   }
-
-  // --- stop mode -----------------------------------------------------------
-  const delivered = loadDelivered();
-  const present = new Set(awaiting.map(m => `${m.id}@${m.responded_at}`));
-
-  // Prune tokens that left the awaiting set (resolved, or a later reply that changed
-  // responded_at) so a fresh reply on the same message can chain again.
-  let pruned = false;
-  for (const token of [...delivered]) {
-    if (!present.has(token)) { delivered.delete(token); pruned = true; }
-  }
-
-  const freshAwaiting = awaiting.filter(m => !delivered.has(`${m.id}@${m.responded_at}`));
-
-  // Inbox messages always chain — they were just deleted above, so there is nothing
-  // to guard against re-delivering.
-  if (!freshAwaiting.length && !inboxMsgs.length) {
-    if (pruned) saveDelivered(delivered);
-    process.exit(0);
-  }
-
-  for (const m of freshAwaiting) delivered.add(`${m.id}@${m.responded_at}`);
-  saveDelivered(delivered);
-
-  // The Stop activity hook (which runs before this one — see .claude/settings.json)
-  // has already flipped the state to idle. Blocking means the turn keeps going, so
-  // put it back to working or the front end's spinner lies for the rest of the turn.
-  const first = inboxMsgs[0];
-  patchActivity({
-    state: 'working',
-    last_event: new Date().toISOString(),
-    task: tidy(first ? first.text : `reply on ${freshAwaiting[0].id}: ${freshAwaiting[0].title}`),
-    task_source: 'inbound',
-    task_at: new Date().toISOString(),
-    subtask: ''
-  });
-
-  process.stdout.write(JSON.stringify({
-    decision: 'block',
-    reason: describe(freshAwaiting, inboxMsgs)
-      + '\n\nThis arrived from the front end while you were working. Handle it now '
-      + 'rather than ending the turn.'
-  }));
-} catch {
-  // Never block a turn on gate trouble — silent failure here beats an unrelated
-  // outage taking down every prompt in the workspace.
+  process.exit(0);
 }
-process.exit(0);
+
+module.exports = { run };
+if (require.main === module) run(process.argv.slice(2));

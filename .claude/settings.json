@@ -1,41 +1,41 @@
 {
   "hooks": {
     "SessionStart": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/session-start.js" }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook session-start" }] }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "node kernel/hooks/activity-hook.js UserPromptSubmit" },
-          { "type": "command", "command": "node kernel/hooks/gate.js prompt" }
+          { "type": "command", "command": "node shells.js hook activity UserPromptSubmit" },
+          { "type": "command", "command": "node shells.js hook gate prompt" }
         ]
       }
     ],
     "PostToolUse": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js PostToolUse", "async": true }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook activity PostToolUse", "async": true }] }
     ],
     "SubagentStart": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js SubagentStart", "async": true }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook activity SubagentStart", "async": true }] }
     ],
     "SubagentStop": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js SubagentStop", "async": true }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook activity SubagentStop", "async": true }] }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "node kernel/hooks/activity-hook.js Stop" },
-          { "type": "command", "command": "node kernel/hooks/gate.js stop" }
+          { "type": "command", "command": "node shells.js hook activity Stop" },
+          { "type": "command", "command": "node shells.js hook gate stop" }
         ]
       }
     ],
     "PreCompact": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js PreCompact" }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook activity PreCompact" }] }
     ],
     "PostCompact": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js PostCompact" }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook activity PostCompact" }] }
     ],
     "SessionEnd": [
-      { "hooks": [{ "type": "command", "command": "node kernel/hooks/activity-hook.js SessionEnd" }] }
+      { "hooks": [{ "type": "command", "command": "node shells.js hook activity SessionEnd" }] }
     ]
   }
 }

@@ -14,7 +14,7 @@
 
 **Assume whoever is driving this session does not read the chat/terminal stream.**
 They may type into it, but anything they need to see, decide, act on, or learn
-must be pushed as a **message** through the store (`store/cli.js`) and read from
+must be pushed as a **message** through the store (`shells.js store`) and read from
 whatever front end is watching it. If something only exists in chat scrollback, it
 did not happen — the log is a rehearsal, not the record.
 
@@ -27,7 +27,7 @@ Do not decide per-answer whether something is "substantial enough" to surface �
 that judgment call is exactly where this leaks. An answer gets left in chat
 because it felt like conversation rather than output, and it is never seen again.
 The rule is mechanical, not a matter of taste: before you stop, something went
-through `store/cli.js new <kind>`.
+through `shells.js store new <kind>`.
 
 ## The four message types
 
@@ -100,14 +100,14 @@ so it can be answered async — don't let it sit buried in old scrollback.
 
 ```bash
 echo '{"title":"…","chosen":"…","options":["…","…"],"rationale":"…","body":"…"}' \
-  | node store/cli.js new decision
+  | node shells.js store new decision
 
-echo '{"title":"…","body":"…"}' | node store/cli.js new task
-echo '{"title":"…","body":"…"}' | node store/cli.js new knowledge
-echo '{"title":"…","body":"…"}' | node store/cli.js new notification
+echo '{"title":"…","body":"…"}' | node shells.js store new task
+echo '{"title":"…","body":"…"}' | node shells.js store new knowledge
+echo '{"title":"…","body":"…"}' | node shells.js store new notification
 
-node store/cli.js list [decision|task|knowledge|notification] [--all]
-node store/cli.js resolve <id>     # once you've applied a reply on an answered/done message
+node shells.js store list [decision|task|knowledge|notification] [--all]
+node shells.js store resolve <id>     # once you've applied a reply on an answered/done message
 ```
 
 ## Lifecycles

@@ -7,7 +7,7 @@
 // case kernel/hooks/gate.js cannot cover, because idle means no hook is firing at
 // all (see kernel/hooks/session-start.js for why only the model can arm this).
 //
-//   node watch-inbox.js [pollMs]
+//   node shells.js watch [pollMs]     (through the dispatcher; the arg is pollMs)
 //
 // Delivery semantics match gate.js: draining a message DELETES its file, so
 // whichever of the two — this watcher (idle case) or gate.js (active-turn case) —
@@ -33,54 +33,62 @@ const path = require('path');
 const { atomicWrite, readJson } = require('../kernel/lib/atomic');
 const { inboxDir, watcherFile } = require('../kernel/lib/paths');
 
-const POLL = Math.max(50, parseInt(process.argv[2], 10) || 1000);
-const STALE_MS = Math.max(1000, POLL) * 3 + 1000;
+// argv[0] is the poll interval in ms. Exported as run() so the shells.js dispatcher
+// can start it; the guard at the bottom keeps it runnable standalone too. This is a
+// long-running process — run() sets up the interval and returns, it never exits on
+// its own (the event loop keeps it alive until the Monitor kills it).
+function run(argv) {
+  const POLL = Math.max(50, parseInt(argv[0], 10) || 1000);
+  const STALE_MS = Math.max(1000, POLL) * 3 + 1000;
+  const ARMED_AT = new Date().toISOString();
 
-function beat() {
-  atomicWrite(watcherFile(), JSON.stringify({
-    pid: process.pid,
-    poll_ms: POLL,
-    beat_at: new Date().toISOString(),
-    armed_at: ARMED_AT
-  }) + '\n');
-}
-
-const ARMED_AT = new Date().toISOString();
-
-function drain() {
-  let names;
-  try { names = fs.readdirSync(inboxDir()).filter(f => f.endsWith('.json')).sort(); }
-  catch { return; } // directory may not exist yet — nothing to do
-
-  for (const f of names) {
-    const full = path.join(inboxDir(), f);
-    const rec = readJson(full, null);
-    // Delete first: a crash after this point loses the message rather than
-    // replaying it on the next tick — the safer of the two failure modes.
-    try { fs.unlinkSync(full); } catch { continue; }
-    if (!rec || !rec.text) continue;
-    // Newlines would split one message into several notification events.
-    process.stdout.write(`[shells-inbox] ${String(rec.text).replace(/\r?\n/g, '  |  ')}\n`);
+  function beat() {
+    atomicWrite(watcherFile(), JSON.stringify({
+      pid: process.pid,
+      poll_ms: POLL,
+      beat_at: new Date().toISOString(),
+      armed_at: ARMED_AT
+    }) + '\n');
   }
-}
 
-// Single-listener guard. Two watchers draining the same directory would make
-// delivery a race — each message reaches exactly one of them, unpredictably, with
-// no way to tell which. Refuse to start a second one if a heartbeat is still fresh.
-const existing = readJson(watcherFile(), null);
-if (existing && existing.beat_at) {
-  const age = Date.now() - Date.parse(existing.beat_at);
-  if (Number.isFinite(age) && age < STALE_MS) {
-    process.stdout.write(
-      `[shells-inbox] NOT LISTENING — another watcher (pid ${existing.pid}) has a heartbeat `
-      + `${Math.round(age / 1000)}s old, still within its staleness window. Run one watcher `
-      + `at a time; stop it first if it's actually dead.\n`);
-    process.exit(0);
+  function drain() {
+    let names;
+    try { names = fs.readdirSync(inboxDir()).filter(f => f.endsWith('.json')).sort(); }
+    catch { return; } // directory may not exist yet — nothing to do
+
+    for (const f of names) {
+      const full = path.join(inboxDir(), f);
+      const rec = readJson(full, null);
+      // Delete first: a crash after this point loses the message rather than
+      // replaying it on the next tick — the safer of the two failure modes.
+      try { fs.unlinkSync(full); } catch { continue; }
+      if (!rec || !rec.text) continue;
+      // Newlines would split one message into several notification events.
+      process.stdout.write(`[shells-inbox] ${String(rec.text).replace(/\r?\n/g, '  |  ')}\n`);
+    }
   }
-  // Stale heartbeat: the previous holder is presumed dead. Take over — this is the
-  // ordinary "watcher restarted" case, not a rival session.
+
+  // Single-listener guard. Two watchers draining the same directory would make
+  // delivery a race — each message reaches exactly one of them, unpredictably, with
+  // no way to tell which. Refuse to start a second one if a heartbeat is still fresh.
+  const existing = readJson(watcherFile(), null);
+  if (existing && existing.beat_at) {
+    const age = Date.now() - Date.parse(existing.beat_at);
+    if (Number.isFinite(age) && age < STALE_MS) {
+      process.stdout.write(
+        `[shells-inbox] NOT LISTENING — another watcher (pid ${existing.pid}) has a heartbeat `
+        + `${Math.round(age / 1000)}s old, still within its staleness window. Run one watcher `
+        + `at a time; stop it first if it's actually dead.\n`);
+      process.exit(0);
+    }
+    // Stale heartbeat: the previous holder is presumed dead. Take over — this is the
+    // ordinary "watcher restarted" case, not a rival session.
+  }
+
+  setInterval(() => { beat(); drain(); }, POLL);
+  beat();
+  drain();
 }
 
-setInterval(() => { beat(); drain(); }, POLL);
-beat();
-drain();
+module.exports = { run };
+if (require.main === module) run(process.argv.slice(2));

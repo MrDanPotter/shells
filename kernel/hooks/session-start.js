@@ -30,49 +30,57 @@
 // until the session happens to take another turn (see kernel/lib/watcher-status.js
 // for how a front end should report that gap honestly rather than hiding it).
 //
-// Stays quiet about everything else. Startup context is expensive and this
-// competes directly with the user's actual first prompt.
+// Everything the session runs — this hook, the watcher, the store CLI — goes through
+// the shells.js dispatcher, so the commands printed below name shells.js, never an
+// internal path. Startup context is expensive, so this stays tight.
 
 const fs = require('fs');
 const path = require('path');
 const { ROOT, inboxDir } = require('../lib/paths');
 
-try {
-  let queued = 0;
-  try { queued = fs.readdirSync(inboxDir()).filter(f => f.endsWith('.json')).length; } catch { /* none yet */ }
+function run() {
+  try {
+    let queued = 0;
+    try { queued = fs.readdirSync(inboxDir()).filter(f => f.endsWith('.json')).length; } catch { /* none yet */ }
 
-  const watcherPath = path.join(ROOT, 'watcher', 'watch-inbox.js').split(path.sep).join('/');
+    // Absolute path: a Monitor command is not guaranteed to run with the project
+    // root as its cwd, so the watcher entrypoint must be fully resolved.
+    const shellsPath = path.join(ROOT, 'shells.js').split(path.sep).join('/');
 
-  const lines = [
-    '[shells] Arm the keep-alive watcher for this session, so inbox messages from the',
-    'front end reach you even while idle (a Monitor is session-scoped and can only be',
-    'started from inside the model — see kernel/hooks/session-start.js for why):',
-    '',
-    '    Monitor({',
-    `      command: "node ${watcherPath} 1000",`,
-    '      description: "shells inbox watcher",',
-    '      persistent: true,',
-    '      timeout_ms: 3600000',
-    '    })',
-    '',
-    'Do this once, early in the session.',
-    '',
-    '[shells] The front end — not this chat stream — is the interface. From your first',
-    'turn on, surface anything the user needs to see, decide, or act on as a MESSAGE',
-    'through the store, and keep chat to a one-line pointer at it:',
-    '',
-    "    echo '{\"title\":\"…\",\"body\":\"…\"}' | node store/cli.js new notification",
-    '',
-    'Four kinds — decision (needs a reply; must include "chosen", the default you',
-    'already took), task (a human must do it by hand), knowledge (worth re-reading),',
-    'notification (just reporting what you did). End every turn having pushed at least',
-    'one. Full routing rules: contract/CLAUDE.fragment.md.'
-  ];
-  if (queued) {
-    lines.push('', `${queued} inbox message(s) are already queued and will arrive once it is armed.`);
+    const lines = [
+      '[shells] Arm the keep-alive watcher for this session, so inbox messages from the',
+      'front end reach you even while idle (a Monitor is session-scoped and can only be',
+      'started from inside the model — see kernel/hooks/session-start.js for why):',
+      '',
+      '    Monitor({',
+      `      command: "node ${shellsPath} watch 1000",`,
+      '      description: "shells inbox watcher",',
+      '      persistent: true,',
+      '      timeout_ms: 3600000',
+      '    })',
+      '',
+      'Do this once, early in the session.',
+      '',
+      '[shells] The front end — not this chat stream — is the interface. From your first',
+      'turn on, surface anything the user needs to see, decide, or act on as a MESSAGE',
+      'through the store, and keep chat to a one-line pointer at it:',
+      '',
+      "    echo '{\"title\":\"…\",\"body\":\"…\"}' | node shells.js store new notification",
+      '',
+      'Four kinds — decision (needs a reply; must include "chosen", the default you',
+      'already took), task (a human must do it by hand), knowledge (worth re-reading),',
+      'notification (just reporting what you did). End every turn having pushed at least',
+      'one. Full routing rules: contract/CLAUDE.fragment.md.'
+    ];
+    if (queued) {
+      lines.push('', `${queued} inbox message(s) are already queued and will arrive once it is armed.`);
+    }
+    process.stdout.write(lines.join('\n') + '\n');
+  } catch {
+    // Never block session startup.
   }
-  process.stdout.write(lines.join('\n') + '\n');
-} catch {
-  // Never block session startup.
+  process.exit(0);
 }
-process.exit(0);
+
+module.exports = { run };
+if (require.main === module) run();

@@ -7,6 +7,15 @@
   "engines": {
     "node": ">=18"
   },
+  "files": [
+    "shells.js",
+    "kernel",
+    "watcher",
+    "store",
+    "contract",
+    "protocol.md",
+    "doctor.js"
+  ],
   "scripts": {
     "doctor": "node doctor.js",
     "reference": "node reference/server.js"
