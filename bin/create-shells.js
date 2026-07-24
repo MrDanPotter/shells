@@ -58,15 +58,19 @@ try {
     process.stdout.write(`  ${GLYPH[s.action] || '?'} ${s.action.padEnd(9)} ${s.label}\n`);
   }
 
-  process.stdout.write([
-    '',
-    result.dryRun ? 'Re-run without --dry-run to apply.' : 'Next steps:',
-    result.dryRun ? '' : `  1. Open a Claude Code session in this project and arm the watcher when`,
-    result.dryRun ? '' : `     ${VENDOR}/shells.js's session-start hook prints the Monitor(...) call.`,
-    result.dryRun ? '' : `  2. Build a front end against ${VENDOR}/protocol.md (or run the reference`,
-    result.dryRun ? '' : `     server with --with-demo). Verify with: node ${VENDOR}/doctor.js`,
-    ''
-  ].filter(l => l !== '').join('\n') + '\n');
+  if (result.dryRun) {
+    process.stdout.write('\nRe-run without --dry-run to apply.\n');
+  } else {
+    const steps = [];
+    if (positional[0]) steps.push(`cd ${positional[0]}`);
+    steps.push(`open a Claude Code session here, and arm the watcher when ${VENDOR}/shells.js's`
+      + ` session-start hook prints the Monitor(...) call`);
+    steps.push(result.withDemo
+      ? `run the reference UI: node ${VENDOR}/reference/server.js`
+      : `build a front end against ${VENDOR}/protocol.md (or re-run with --with-demo for the reference UI)`);
+    steps.push(`verify anytime with: node ${VENDOR}/shells.js doctor`);
+    process.stdout.write('\nNext steps:\n' + steps.map((s, i) => `  ${i + 1}. ${s}`).join('\n') + '\n');
+  }
 } catch (e) {
   process.stderr.write('create-shells: ' + ((e && e.message) || e) + '\n');
   process.exit(1);
