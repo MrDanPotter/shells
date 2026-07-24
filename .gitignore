@@ -2,3 +2,6 @@ state/
 node_modules/
 .claude/settings.local.json
 *.log
+
+# temporary: planning docs held back from the checkpoint, to be committed later
+docs/

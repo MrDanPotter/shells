@@ -50,6 +50,7 @@ delivered immediately if the watcher is armed.
 ## Layout
 
 ```
+CLAUDE.md                 dogfoods the contract on this repo (imports the fragment)
 .claude/settings.json     hook wiring for THIS repo (dogfoods the kit on itself)
 contract/
   CLAUDE.fragment.md      TIER 2 — paste into a project's CLAUDE.md as-is
@@ -107,6 +108,10 @@ paths (`node kernel/hooks/activity-hook.js ...`) because Claude Code runs hooks
 with the project root as the working directory — no absolute paths, no
 platform-specific separators, so the same `settings.json` works unmodified on
 any OS.
+
+For a full primer on how the pieces fit together, plus options for packaging shells
+as a self-contained install (a scaffolder, an npm package, and more), see
+[`docs/packaging.md`](docs/packaging.md).
 
 ## Running the doctor
 
