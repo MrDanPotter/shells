@@ -9,17 +9,24 @@
 // name `shells.js` and nothing else, never an internal path like
 // kernel/hooks/gate.js. Because the integration surface depends only on this stable
 // entrypoint, shells' internals can move (into .shells/, a bundle, an npm package)
-// without the host project changing a line. See docs/scaffolder-plan.md (Phase 0).
+// without the host project changing a line. See docs/scaffolder-plan.md.
 //
-// It is pure indirection — each subcommand calls the same module that used to be its
-// own script, which still runs standalone too (each keeps a `require.main` guard).
+// Runtime hooks are pure indirection — each subcommand calls the same module that
+// used to be its own script, which still runs standalone too (each keeps a
+// `require.main` guard). The install-management subcommands operate on the project
+// this vendored copy sits in.
 //
 //   node shells.js hook activity <Event>      lifecycle heartbeat   (kernel/hooks/activity-hook.js)
 //   node shells.js hook gate <prompt|stop>    inbound delivery      (kernel/hooks/gate.js)
 //   node shells.js hook session-start         startup instructions  (kernel/hooks/session-start.js)
 //   node shells.js watch [pollMs]             keep-alive watcher     (watcher/watch-inbox.js)
 //   node shells.js store <cmd> [args]         agent CLI over the store (store/cli.js)
+//   node shells.js doctor                     self-check this install
+//   node shells.js version                    print the vendored kit version
+//   node shells.js init                       re-apply the wiring for this install
+//   node shells.js update                     how to pull a newer kit
 
+const path = require('path');
 const [area, ...rest] = process.argv.slice(2);
 
 function fail(msg) { process.stderr.write(msg + '\n'); process.exit(1); }
@@ -30,7 +37,11 @@ const USAGE = [
   '  hook gate <prompt|stop>      inbound delivery hook',
   '  hook session-start           startup instructions',
   '  watch [pollMs]               keep-alive inbox watcher',
-  '  store <cmd> [args]           new|list|get|respond|read|resolve|reopen'
+  '  store <cmd> [args]           new|list|get|respond|read|resolve|reopen',
+  '  doctor                       self-check this install',
+  '  version                      print the vendored kit version',
+  '  init                         re-apply this install\'s wiring',
+  '  update                       how to pull a newer kit'
 ].join('\n');
 
 switch (area) {
@@ -45,12 +56,53 @@ switch (area) {
     require(hooks[name]).run(args);
     break;
   }
+
   case 'watch':
     require('./watcher/watch-inbox').run(rest);
     break;
+
   case 'store':
     require('./store/cli').run(rest);
     break;
+
+  case 'doctor':
+    // doctor.js runs on require and exits with its own code.
+    require('./doctor.js');
+    break;
+
+  case 'version': {
+    const fs = require('fs');
+    let line;
+    const stamp = (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, '.shells-version'), 'utf8')); } catch { return null; } })();
+    if (stamp) line = `shells kit ${stamp.version} (installed ${stamp.installed_at})`;
+    else { try { line = `shells kit ${require('./package.json').version} (source tree)`; } catch { line = 'shells kit (version unknown)'; } }
+    process.stdout.write(line + '\n');
+    break;
+  }
+
+  case 'init': {
+    // Re-apply the wiring for the project this vendored copy lives in. The vendor
+    // prefix is however this dir is named relative to the project root (cwd) —
+    // usually ".shells" — so a custom install dir still wires correctly.
+    const projectRoot = process.cwd();
+    const vendor = path.relative(projectRoot, __dirname) || '.';
+    const res = require('./lib/init').rewire({ projectRoot, vendor, dryRun: rest.includes('--dry-run') });
+    process.stdout.write(`re-wiring ${vendor} in ${projectRoot}${res.dryRun ? ' (dry run)' : ''}:\n`);
+    for (const s of res.steps) process.stdout.write(`  ${s.action.padEnd(9)} ${s.label}\n`);
+    break;
+  }
+
+  case 'update':
+    process.stdout.write([
+      'To update the vendored kit, re-run the scaffolder from the project root:',
+      '',
+      '  npx create-shells --force',
+      '',
+      'That re-copies the kit into this directory from the latest published version,',
+      'leaving your .claude/settings.json, CLAUDE.md, and state/ untouched.'
+    ].join('\n') + '\n');
+    break;
+
   default:
     fail(USAGE);
 }

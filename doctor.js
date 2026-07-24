@@ -67,10 +67,11 @@ function activity() { return readJson(activityFile(), {}); }
 // are the tripwire that the three never drift — a kit file added but left out of the
 // manifest (or the tarball) would otherwise ship a broken install, silently.
 //
-// DEV-REPO ONLY: a vendored .shells/ install copies just `manifest.kit`, so it has
-// neither lib/manifest.js nor a package.json. Skip cleanly there rather than crash —
-// doctor.js itself ships in the kit and must run in both places.
-if (fs.existsSync(path.join(ROOT, 'lib', 'manifest.js'))) {
+// DEV-REPO / PACKAGE ONLY: the "files" mirror and kit-surface invariant are about the
+// npm tarball, so they only make sense where a package.json is present. A vendored
+// .shells/ install now carries lib/manifest.js too (for `shells.js init`), so gate on
+// package.json — that is the thing a vendored copy lacks — and skip cleanly there.
+if (fs.existsSync(path.join(ROOT, 'package.json')) && fs.existsSync(path.join(ROOT, 'lib', 'manifest.js'))) {
   const manifest = require('./lib/manifest');
   for (const p of [...manifest.kit, ...manifest.demo]) {
     check(`manifest: path exists on disk — ${p}`, fs.existsSync(path.join(ROOT, p)), p);
