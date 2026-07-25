@@ -69,10 +69,16 @@ switch (area) {
 
   case 'dev': {
     // One command to bring up the whole loop: start the web UI in the background,
-    // then launch Claude Code in the foreground. When the session exits, tear the
-    // UI down. This is a convenience launcher, not part of the core mechanism — it
-    // needs the included UI (skip it and you scaffolded with --no-ui) and `claude`
-    // on PATH. It cannot arm the watcher for you; the session-start hook still does.
+    // then launch Claude Code in the foreground, and tear the UI down on exit. This
+    // is a convenience launcher, not part of the core mechanism — it needs the
+    // included UI (skip it and you scaffolded with --no-ui) and `claude` on PATH.
+    //
+    // Crucially, it PRIMES the session to arm the watcher on its very first turn.
+    // Without that, a user who only ever touches the web UI never gives the model a
+    // turn — so it never arms the watcher and web-UI messages are never delivered.
+    // The arm is a model tool call (Monitor), so only the model can do it; this
+    // launcher can only make sure the model gets a first turn in which to do it. That
+    // same first turn also drains any inbox message already waiting (gate prompt).
     const fs = require('fs');
     const { spawn } = require('child_process');
     const server = path.join(__dirname, 'reference', 'server.js');
@@ -83,14 +89,36 @@ switch (area) {
     const port = process.env.PORT || 4420;
     const srv = spawn(process.execPath, [server], { stdio: 'ignore' });
     srv.on('error', e => process.stderr.write(`shells dev: UI failed to start: ${e.message}\n`));
-    process.stdout.write(`shells UI:  http://127.0.0.1:${port}   (launching Claude Code…)\n`);
-
     const stop = () => { try { srv.kill(); } catch { /* already gone */ } };
-    const claude = spawn('claude', rest, { stdio: 'inherit', shell: true });
-    claude.on('exit', code => { stop(); process.exit(code == null ? 0 : code); });
-    claude.on('error', e => { stop(); fail(`shells dev: could not launch claude (${e.message}). Is the Claude Code CLI on your PATH?`); });
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
+
+    const armPrompt = `[shells dev] The web UI is live at http://127.0.0.1:${port}. `
+      + `Before anything else, arm the keep-alive inbox watcher exactly as the SessionStart `
+      + `hook instructed (make that Monitor tool call) — that is what connects this session `
+      + `to the web UI so messages I send from the browser reach you while you're idle. `
+      + `Then confirm it's armed and stand by for web-UI messages.`;
+    const claudeArgs = [...rest, armPrompt];
+
+    process.stdout.write(`shells UI:  http://127.0.0.1:${port}   (launching Claude Code — it arms the watcher on start)\n`);
+
+    const onExit = child => child.on('exit', code => { stop(); process.exit(code == null ? 0 : code); });
+    // claude is claude.exe here: spawn without a shell so array args (a multi-word
+    // prompt) pass cleanly. Some installs ship claude.cmd, which Node refuses to
+    // spawn without a shell (EINVAL) — fall back to a shell, quoting the args.
+    const claude = spawn('claude', claudeArgs, { stdio: 'inherit' });
+    claude.on('error', e => {
+      if (e.code === 'EINVAL' || e.code === 'ENOENT') {
+        const quoted = claudeArgs.map(a => `"${String(a).replace(/"/g, '\\"')}"`).join(' ');
+        const viaShell = spawn(`claude ${quoted}`, { stdio: 'inherit', shell: true });
+        viaShell.on('error', e2 => { stop(); fail(`shells dev: could not launch claude (${e2.message}). Is the Claude Code CLI on your PATH?`); });
+        onExit(viaShell);
+        return;
+      }
+      stop();
+      fail(`shells dev: could not launch claude (${e.message}). Is the Claude Code CLI on your PATH?`);
+    });
+    onExit(claude);
     break;
   }
 

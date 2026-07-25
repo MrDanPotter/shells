@@ -67,11 +67,14 @@ try {
     process.stdout.write('\nRe-run without --dry-run to apply.\n');
   } else {
     const steps = [`cd ${positional[0]}`];
-    steps.push(result.ui
-      ? `start the web UI and Claude Code together: node ${VENDOR}/shells.js dev`
-      : `build/run your own front end against ${VENDOR}/protocol.md, then launch Claude Code`);
-    steps.push(`when the session starts, arm the watcher as its session-start hook prints`);
-    steps.push(`verify anytime with: node ${VENDOR}/shells.js doctor`);
+    if (result.ui) {
+      steps.push(`start the web UI + Claude Code (Claude arms the watcher on launch): node ${VENDOR}/shells.js dev`);
+      steps.push(`open http://127.0.0.1:4420 and drive the session from there`);
+    } else {
+      steps.push(`build/run your own front end against ${VENDOR}/protocol.md, then launch Claude Code`);
+      steps.push(`in that session, arm the watcher as its session-start hook prints`);
+    }
+    steps.push(`verify the wiring anytime with: node ${VENDOR}/shells.js doctor`);
     process.stdout.write('\nNext steps:\n' + steps.map((s, i) => `  ${i + 1}. ${s}`).join('\n') + '\n');
   }
 } catch (e) {
