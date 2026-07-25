@@ -65,7 +65,7 @@ function run() {
       'turn on, surface anything the user needs to see, decide, or act on as a MESSAGE',
       'through the store, and keep chat to a one-line pointer at it:',
       '',
-      "    echo '{\"title\":\"…\",\"body\":\"…\"}' | node shells.js store new notification",
+      `    echo '{"title":"…","body":"…"}' | node ${shellsPath} store new notification`,
       '',
       'Four kinds — decision (needs a reply; must include "chosen", the default you',
       'already took), task (a human must do it by hand), knowledge (worth re-reading),',

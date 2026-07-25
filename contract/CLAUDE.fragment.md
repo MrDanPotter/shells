@@ -98,6 +98,11 @@ so it can be answered async — don't let it sit buried in old scrollback.
 
 ## Pushing messages
 
+`shells.js` below is the dispatcher's path **as run from the project root**. In a
+scaffolded project that is `.shells/shells.js` — use that exact path (the SessionStart
+hook prints it in full). Don't `cd` into the vendored dir to shorten it; run these
+from the project root so relative paths elsewhere keep working.
+
 ```bash
 echo '{"title":"…","chosen":"…","options":["…","…"],"rationale":"…","body":"…"}' \
   | node shells.js store new decision
