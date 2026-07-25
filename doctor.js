@@ -73,7 +73,7 @@ function activity() { return readJson(activityFile(), {}); }
 // package.json — that is the thing a vendored copy lacks — and skip cleanly there.
 if (fs.existsSync(path.join(ROOT, 'package.json')) && fs.existsSync(path.join(ROOT, 'lib', 'manifest.js'))) {
   const manifest = require('./lib/manifest');
-  for (const p of [...manifest.kit, ...manifest.demo]) {
+  for (const p of manifest.kit) {
     check(`manifest: path exists on disk — ${p}`, fs.existsSync(path.join(ROOT, p)), p);
   }
   const pkg = readJson(path.join(ROOT, 'package.json'), null);

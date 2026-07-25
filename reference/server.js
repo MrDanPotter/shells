@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 'use strict';
 
-// Reference client — a small front end implementing protocol.md.
+// The included web UI — the front end shells ships with, implementing protocol.md.
 //
-// This is still a REFERENCE, not a framework: read protocol.md, build your own
-// server (any language, any stack), and diff its behaviour against this one if
-// something doesn't line up. What changed from the first skeleton is that the page
-// is now styled and live — it polls the JSON API and re-renders, so a message the
-// agent pushes shows up on its own within a poll interval instead of only after a
-// manual reload. That "you can actually see the agent talk back" property is the
-// whole point of a bidirectional demo, so it belongs in the reference.
+// This is the interface a fresh install comes with ON PURPOSE: a barebones setup
+// with no UI leaves the user with no idea what to do, so this ships by default
+// (`--no-ui` opts out) and `shells.js dev` launches it alongside the session. It is
+// still a clean, single-file implementation of protocol.md — read that file and you
+// can replace this with your own front end in any stack — but it is meant to be run,
+// not just diffed against. The page is styled and live: it polls the JSON API and
+// re-renders, so a message the agent pushes shows up on its own within a poll
+// interval — you actually see the agent talk back.
 //
 // Layout: one centered column — chat (what you send to the session) on top, then a
 // tabbed message panel (one tab per message kind) for what the agent sends you.

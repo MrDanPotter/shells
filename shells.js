@@ -21,6 +21,7 @@
 //   node shells.js hook session-start         startup instructions  (kernel/hooks/session-start.js)
 //   node shells.js watch [pollMs]             keep-alive watcher     (watcher/watch-inbox.js)
 //   node shells.js store <cmd> [args]         agent CLI over the store (store/cli.js)
+//   node shells.js dev                        start the web UI + launch Claude Code
 //   node shells.js doctor                     self-check this install
 //   node shells.js version                    print the vendored kit version
 //   node shells.js init                       re-apply the wiring for this install
@@ -38,6 +39,7 @@ const USAGE = [
   '  hook session-start           startup instructions',
   '  watch [pollMs]               keep-alive inbox watcher',
   '  store <cmd> [args]           new|list|get|respond|read|resolve|reopen',
+  '  dev                          start the web UI + launch Claude Code',
   '  doctor                       self-check this install',
   '  version                      print the vendored kit version',
   '  init                         re-apply this install\'s wiring',
@@ -64,6 +66,33 @@ switch (area) {
   case 'store':
     require('./store/cli').run(rest);
     break;
+
+  case 'dev': {
+    // One command to bring up the whole loop: start the web UI in the background,
+    // then launch Claude Code in the foreground. When the session exits, tear the
+    // UI down. This is a convenience launcher, not part of the core mechanism — it
+    // needs the included UI (skip it and you scaffolded with --no-ui) and `claude`
+    // on PATH. It cannot arm the watcher for you; the session-start hook still does.
+    const fs = require('fs');
+    const { spawn } = require('child_process');
+    const server = path.join(__dirname, 'reference', 'server.js');
+    if (!fs.existsSync(server)) {
+      fail('shells dev: the web UI is not installed here (scaffolded with --no-ui?). '
+        + 'Run your own front end and launch `claude` yourself.');
+    }
+    const port = process.env.PORT || 4420;
+    const srv = spawn(process.execPath, [server], { stdio: 'ignore' });
+    srv.on('error', e => process.stderr.write(`shells dev: UI failed to start: ${e.message}\n`));
+    process.stdout.write(`shells UI:  http://127.0.0.1:${port}   (launching Claude Code…)\n`);
+
+    const stop = () => { try { srv.kill(); } catch { /* already gone */ } };
+    const claude = spawn('claude', rest, { stdio: 'inherit', shell: true });
+    claude.on('exit', code => { stop(); process.exit(code == null ? 0 : code); });
+    claude.on('error', e => { stop(); fail(`shells dev: could not launch claude (${e.message}). Is the Claude Code CLI on your PATH?`); });
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+    break;
+  }
 
   case 'doctor':
     // doctor.js runs on require and exits with its own code.

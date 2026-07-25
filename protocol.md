@@ -12,10 +12,10 @@ without reading a line of `kernel/`. Two independent data flows:
   it is the one part of this contract worth understanding rather than skimming.
 
 Everything here is plain JSON files, written with temp-file-plus-rename so you
-will never read a half-written one. `reference/server.js` is one working
-implementation of the HTTP shape described below, built ONLY from this contract —
-diff your own front end's behaviour against it if something seems off, but don't
-copy it; it's deliberately throwaway.
+will never read a half-written one. `reference/server.js` is the included web UI and
+one working implementation of the HTTP shape described below, built ONLY from this
+contract — it ships by default so an install has a working interface, and it's also
+the thing to diff your own front end against if you replace it (`--no-ui`).
 
 ---
 
@@ -128,7 +128,7 @@ exactly the trust boundary of "one user, one machine."
 | GET | `/api/watcher` | — | is inbound delivery-while-idle actually armed (§3) |
 | GET | `/api/version` | — | `{server_stale}` — has the running process drifted from the code on disk |
 
-All responses are `application/json` except `GET /` (the throwaway demo page).
+All responses are `application/json` except `GET /` (the web UI page).
 Errors are `{"error": "…"}` with a 4xx/5xx status. There is no batch endpoint —
 one call per action, on purpose; this is a kit meant to be read in full, and a
 batch endpoint is exactly the kind of surface area that isn't worth the read.

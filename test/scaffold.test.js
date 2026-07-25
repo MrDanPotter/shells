@@ -1,10 +1,10 @@
 'use strict';
 
 // End-to-end test for the create-shells scaffolder. Runs the REAL bin against
-// throwaway project directories (never touching this repo's own state), the same
-// discipline doctor.js uses. Covers: dry-run inertness, the vendored kit surface,
-// settings.json/CLAUDE.md/.gitignore merge, idempotency, the vendored dispatcher
-// subcommands, --with-demo, and greenfield creation.
+// throwaway directories (never touching this repo's own state), the same discipline
+// doctor.js uses. Covers: the required directory arg, dry-run inertness, the vendored
+// kit surface (UI included by default), settings.json/CLAUDE.md/.gitignore merge,
+// idempotency, the vendored dispatcher subcommands, --no-ui, and the dev guard.
 //
 //   node test/scaffold.test.js        (or: npm test)
 //
@@ -28,8 +28,15 @@ const read = p => fs.readFileSync(p, 'utf8');
 const exists = p => fs.existsSync(p);
 const tmp = prefix => fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 
-// --- a fake EXISTING project (to exercise the merge paths) ---
-const proj = tmp('shells-proj-');
+const parent = tmp('shells-parent-');
+
+// 0. a bare directory arg is REQUIRED — no scaffolding into the cwd by accident
+let reqErr = '';
+try { run([], parent); } catch (e) { reqErr = (e.stderr || '') + (e.stdout || ''); }
+ok('no directory arg errors', /target directory is required/.test(reqErr), reqErr.slice(0, 80));
+
+// a fake EXISTING project at a named path (to exercise the merge paths)
+const proj = path.join(parent, 'app');
 fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
 fs.writeFileSync(path.join(proj, '.claude', 'settings.json'),
   JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'node my-own-hook.js' }] }] } }, null, 2));
@@ -37,21 +44,21 @@ fs.writeFileSync(path.join(proj, 'CLAUDE.md'), '# My app\n\nSome existing instru
 fs.writeFileSync(path.join(proj, '.gitignore'), 'node_modules/\n');
 
 // 1. dry run writes nothing
-run(['--dry-run'], proj);
+run([proj, '--dry-run'], parent);
 ok('dry-run does not create .shells/', !exists(path.join(proj, '.shells')));
 ok('dry-run does not touch CLAUDE.md', read(path.join(proj, 'CLAUDE.md')) === '# My app\n\nSome existing instructions.\n');
 
-// 2. real run — vendored kit surface
-run([], proj);
+// 2. real run — vendored kit surface, UI included by DEFAULT
+run([proj], parent);
 const V = path.join(proj, '.shells');
 ok('.shells/shells.js vendored', exists(path.join(V, 'shells.js')));
 ok('.shells/kernel/hooks/gate.js vendored', exists(path.join(V, 'kernel', 'hooks', 'gate.js')));
 ok('.shells/store/seed.js vendored', exists(path.join(V, 'store', 'seed.js')));
 ok('.shells/doctor.js vendored', exists(path.join(V, 'doctor.js')));
-ok('.shells/lib/init.js vendored (enables shells.js init)', exists(path.join(V, 'lib', 'init.js')));
+ok('.shells/lib/init.js vendored', exists(path.join(V, 'lib', 'init.js')));
 ok('.shells/contract fragment vendored', exists(path.join(V, 'contract', 'CLAUDE.fragment.md')));
 ok('.shells/protocol.md vendored', exists(path.join(V, 'protocol.md')));
-ok('reference/ NOT vendored (no --with-demo)', !exists(path.join(V, 'reference')));
+ok('UI vendored by default: .shells/reference/server.js', exists(path.join(V, 'reference', 'server.js')));
 ok('bin/ NOT vendored (scaffolder-only)', !exists(path.join(V, 'bin')));
 ok('.shells/state/ created', exists(path.join(V, 'state')));
 ok('.shells-version stamp written', exists(path.join(V, '.shells-version')));
@@ -72,7 +79,7 @@ ok('.gitignore keeps existing', gi.includes('node_modules/'));
 ok('.gitignore ignores .shells/state/', gi.includes('.shells/state/'));
 
 // 3. idempotency — re-run yields no duplicates
-run([], proj);
+run([proj], parent);
 const settings2 = JSON.parse(read(path.join(proj, '.claude', 'settings.json')));
 const shellsGroups = settings2.hooks.UserPromptSubmit.filter(g => JSON.stringify(g).includes('.shells/shells.js'));
 ok('idempotent: exactly one shells group in UserPromptSubmit', shellsGroups.length === 1, 'got ' + shellsGroups.length);
@@ -93,26 +100,29 @@ const grp3 = settings3.hooks.UserPromptSubmit.filter(g => JSON.stringify(g).incl
 ok('shells.js init re-wire stays idempotent (one shells group)', grp3.length === 1, 'got ' + grp3.length);
 ok('shells.js init preserves foreign hook', JSON.stringify(settings3.hooks.UserPromptSubmit).includes('my-own-hook.js'));
 
-// 5. --with-demo vendors the reference front end
-const proj2 = tmp('shells-demo-');
-run(['--with-demo'], proj2);
-ok('--with-demo vendors reference/server.js', exists(path.join(proj2, '.shells', 'reference', 'server.js')));
+// 5. --no-ui skips the UI, and `dev` refuses without it
+const noui = path.join(parent, 'noui-app');
+run([noui, '--no-ui'], parent);
+ok('--no-ui skips reference/', !exists(path.join(noui, '.shells', 'reference')));
+ok('--no-ui still vendors the kit', exists(path.join(noui, '.shells', 'shells.js')));
+let devErr = '';
+try { execFileSync(process.execPath, [path.join(noui, '.shells', 'shells.js'), 'dev'], { cwd: noui, encoding: 'utf8' }); }
+catch (e) { devErr = (e.stderr || '') + (e.stdout || ''); }
+ok('shells.js dev refuses when the UI is absent', /web UI is not installed/.test(devErr), devErr.slice(0, 80));
 
-// 6. greenfield — create-shells <newdir>
-const parent = tmp('shells-green-');
-run(['fresh-app'], parent);
-const green = path.join(parent, 'fresh-app');
-ok('greenfield creates the target directory', exists(green));
-ok('greenfield vendors the kit', exists(path.join(green, '.shells', 'shells.js')));
-ok('greenfield writes fresh settings.json', exists(path.join(green, '.claude', 'settings.json')));
-ok('greenfield creates a CLAUDE.md with the import', read(path.join(green, 'CLAUDE.md')).includes('@.shells/contract/CLAUDE.fragment.md'));
+// 6. greenfield — a brand-new directory is created and passes its own doctor
+run([path.join(parent, 'fresh')], parent);
+const fresh = path.join(parent, 'fresh');
+ok('greenfield creates the target directory', exists(fresh));
+ok('greenfield vendors the kit', exists(path.join(fresh, '.shells', 'shells.js')));
+ok('greenfield includes the UI by default', exists(path.join(fresh, '.shells', 'reference', 'server.js')));
 let greenDoctor = '';
-try { greenDoctor = execFileSync(process.execPath, [path.join(green, '.shells', 'shells.js'), 'doctor'], { cwd: green, encoding: 'utf8' }); }
+try { greenDoctor = execFileSync(process.execPath, [path.join(fresh, '.shells', 'shells.js'), 'doctor'], { cwd: fresh, encoding: 'utf8' }); }
 catch (e) { greenDoctor = (e.stdout || '') + (e.stderr || ''); }
 ok('greenfield install passes its own doctor', /All checks passed/.test(greenDoctor), greenDoctor.slice(-120));
 
 // cleanup
-for (const d of [proj, proj2, parent]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
+try { fs.rmSync(parent, { recursive: true, force: true }); } catch { /* best effort */ }
 
 console.log(`\nscaffolder test — ${fails === 0 ? 'ALL PASS' : fails + ' FAILED'}`);
 process.exit(fails === 0 ? 0 : 1);

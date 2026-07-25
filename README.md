@@ -73,7 +73,7 @@ store/
   json-store.js           TIER 3 — the only implementation shipped: plain JSON files
   cli.js                  agent-side CLI over the store (stdin JSON, never shell args)
 reference/
-  server.js               TIER 4 — one-file, throwaway reference client/front end
+  server.js               TIER 4 — the included one-file web UI (ships by default)
 doctor.js                 TIER 1 — fires every hook, asserts the effect, checks the watcher
 ```
 
@@ -92,39 +92,47 @@ doctor.js                 TIER 1 — fires every hook, asserts the effect, check
    (`create/list/respond/markRead/resolve` + `reopen`), with one JSON-file
    implementation. No beads here on purpose — swap `json-store.js` for a
    different backend later and nothing else in the repo needs to change.
-4. **Protocol** (`protocol.md`, `reference/server.js`) — the actual deliverable.
-   Someone should be able to build their own front end reading `protocol.md`
-   ALONE, without ever opening `kernel/`. The reference server is proof that the
-   contract works and a worked example of protocol.md's "bruises" (safe escaping,
-   not clobbering unsaved input, honest staleness) — it's styled and live-polling
-   so you can actually watch the agent talk back, but it's still a reference to
-   diff your own front end against, not a base to build on.
+4. **Protocol + UI** (`protocol.md`, `reference/server.js`) — the front-end
+   deliverable. `reference/server.js` is the **included web UI**: it ships by default
+   so a fresh install has a working interface, and `shells.js dev` launches it. It's
+   also a complete, single-file worked example of `protocol.md` (safe escaping, not
+   clobbering unsaved input, honest staleness), so you can read that file alone and
+   replace the UI with your own front end (`--no-ui`) in any stack.
 
-## Adding shells to your own project
+## Adding shells to a project
 
-From inside your project, run the scaffolder:
+Run the scaffolder with a **target directory** (required — it never scaffolds into
+your current directory by accident):
 
 ```bash
-npx create-shells            # add shells to the current project
-npx create-shells my-app     # or scaffold a new project directory
+npx create-shells my-app     # create + initialize my-app/
 ```
 
-It vendors the kit into `.shells/` and wires exactly three thin touch-points into
-your project — nothing else:
+It creates the directory if needed (or augments an existing one), vendors the kit
+**and the web UI** into `.shells/`, and wires exactly three thin touch-points —
+nothing else:
 
 ```
-.shells/                     all of shells' code + runtime state, sealed behind shells.js
+.shells/                     all of shells' code, the web UI, and runtime state
 .claude/settings.json        hooks block merged in (yours preserved), each -> .shells/shells.js
 CLAUDE.md                    one line appended: @.shells/contract/CLAUDE.fragment.md
 .gitignore                   one line appended: .shells/state/
 ```
 
+Then start everything with one command:
+
+```bash
+cd my-app
+node .shells/shells.js dev    # starts the web UI (http://127.0.0.1:4420) + launches Claude Code
+```
+
 Every hook command goes through the single `.shells/shells.js` entrypoint rather
 than naming an internal file, so the internals can be updated or relocated without
-touching your `settings.json`. Re-running is idempotent. Add `--with-demo` to also
-vendor the reference UI; `--dry-run` to preview.
+touching your `settings.json`. Re-running is idempotent. Flags: `--dry-run` to
+preview, `--no-ui` if you're bringing your own front end (built against
+`.shells/protocol.md`), `--force` to re-copy.
 
-Then, from inside the install:
+Other install commands:
 
 ```bash
 node .shells/shells.js doctor    # verify the wiring fires correctly
@@ -132,10 +140,6 @@ node .shells/shells.js version   # what kit version is vendored
 node .shells/shells.js init      # re-apply the wiring if it drifts
 npx create-shells --force        # pull a newer kit (state + wiring untouched)
 ```
-
-Prefer to wire it by hand instead? Copy `shells.js` alongside `kernel/`, `watcher/`,
-`store/`, and `contract/`, then add the hook block from `.claude/settings.json`
-(each command `node <dir>/shells.js hook ...`). The scaffolder just automates this.
 
 For a full primer on how the pieces fit together and the packaging design, see
 [`docs/scaffolder-plan.md`](docs/scaffolder-plan.md) and
@@ -163,8 +167,10 @@ for it explicitly rather than assume it away.
 ## What this kit deliberately does not do
 
 No beads, no two-tier work tracking, no approval-gate/merge workflow, no fleet
-registry, no dev-server launch/stop, no ports registry, nothing Windows-specific
-in any code path. Those are all a *different* concern — orchestrating a fleet of
-apps and their own work trackers — layered on top of a kit like this one, not
-part of it. If you're building that layer, carry forward the process-management
-bruises noted at the bottom of `protocol.md`, but they don't belong in this repo.
+registry, no ports registry, nothing Windows-specific in any code path. Those are
+all a *different* concern — orchestrating a fleet of apps and their own work
+trackers — layered on top of a kit like this one, not part of it. (`shells.js dev`
+is the one small exception to "no process launching": a convenience that starts the
+included UI and Claude Code together — a single-project dev loop, not fleet
+management.) If you're building that fleet layer, carry forward the process-
+management bruises noted at the bottom of `protocol.md`, but they don't belong here.

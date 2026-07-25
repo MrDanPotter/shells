@@ -20,7 +20,8 @@
     "store",
     "contract",
     "protocol.md",
-    "doctor.js"
+    "doctor.js",
+    "reference"
   ],
   "scripts": {
     "doctor": "node doctor.js",
