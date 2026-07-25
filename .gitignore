@@ -4,5 +4,5 @@ node_modules/
 *.log
 *.tgz
 
-# temporary: planning docs held back from the checkpoint, to be committed later
+# planning/design notes — kept local, intentionally out of source control
 docs/

@@ -141,10 +141,6 @@ node .shells/shells.js init      # re-apply the wiring if it drifts
 npx create-shells --force        # pull a newer kit (state + wiring untouched)
 ```
 
-For a full primer on how the pieces fit together and the packaging design, see
-[`docs/scaffolder-plan.md`](docs/scaffolder-plan.md) and
-[`docs/packaging.md`](docs/packaging.md).
-
 ## Running the doctor
 
 ```
