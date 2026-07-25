@@ -1,7 +1,6 @@
 {
   "name": "create-shells",
   "version": "0.1.0",
-  "private": true,
   "description": "Scaffolder + kit for driving a Claude Code session from an external front end using only lifecycle hooks and the filesystem.",
   "keywords": ["claude-code", "hooks", "scaffold", "cli", "front-end"],
   "license": "MIT",
