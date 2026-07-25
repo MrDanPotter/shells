@@ -93,13 +93,17 @@ switch (area) {
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
 
-    // Keep the handshake minimal on purpose: arm the watcher, then a single terse
-    // line — so this reads as a quick "connected" step, not the model visibly being
-    // instructed to do a bunch of setup.
-    const armPrompt = `[shells dev] Connect this session to the web UI at http://127.0.0.1:${port}. `
-      + `Silently arm the keep-alive inbox watcher exactly as the SessionStart hook instructed `
-      + `(the Monitor tool call), then reply with ONLY this one line, nothing else: `
-      + `"🔗 connected to the web UI — standing by." Do not explain, summarize, or take any other action.`;
+    // This prompt IS visible in the Claude UI, so it's written as up-front, readable
+    // "initialization instructions": it names the web UI, tells the model the terminal
+    // is not read by the user (push everything to the web UI), has it arm the watcher,
+    // and then report completion as a web-UI notification rather than terminal chat.
+    const armPrompt = `shells initialization instructions\n\n`
+      + `The shells web UI is running at http://127.0.0.1:${port} — that is the interface for this `
+      + `session. Treat this terminal as something the user will NOT read: push everything the user `
+      + `should see to the web UI as messages through the store, never as terminal chat.\n\n`
+      + `Now:\n`
+      + `1. Start the keep-alive inbox watcher exactly as the SessionStart hook instructed (the Monitor tool call).\n`
+      + `2. Once it is armed, push a notification to the web UI reporting that shells is initialized and you are standing by.`;
     const claudeArgs = [...rest, armPrompt];
 
     process.stdout.write(`shells UI:  http://127.0.0.1:${port}   (launching Claude Code — it arms the watcher on start)\n`);
