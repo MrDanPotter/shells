@@ -18,7 +18,7 @@ code. Clone it, read it in an afternoon, build your own front end on top.
 
 ## Quick start
 
-Add shells to a project with one command (a directory name is required):
+Bootstrap a new shells project:
 
 ```bash
 npx create-shells my-app      # scaffold a new project with shells wired in
