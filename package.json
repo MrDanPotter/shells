@@ -5,6 +5,14 @@
   "keywords": ["claude-code", "hooks", "scaffold", "cli", "front-end"],
   "author": "Dan Potter <potterd64@gmail.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MrDanPotter/shells.git"
+  },
+  "homepage": "https://github.com/MrDanPotter/shells#readme",
+  "bugs": {
+    "url": "https://github.com/MrDanPotter/shells/issues"
+  },
   "engines": {
     "node": ">=18"
   },
