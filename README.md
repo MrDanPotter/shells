@@ -18,6 +18,22 @@ code. Clone it, read it in an afternoon, build your own front end on top.
 
 ## Quick start
 
+Add shells to a project with one command (a directory name is required):
+
+```bash
+npx create-shells my-app      # scaffold a new project with shells wired in
+cd my-app
+node .shells/shells.js dev    # start the web UI + launch Claude Code, connected
+```
+
+`create-shells` vendors the kit **and the web UI** into `my-app/.shells/` and wires the
+three integration points it needs — nothing else. `dev` serves the web UI at
+`http://127.0.0.1:4420` and launches a Claude session already connected to it, so you
+drive the work from the browser. Flags (`--no-ui`, `--dry-run`, `--force`), post-install
+commands, and how it all wires up: [Adding shells to a project](#adding-shells-to-a-project).
+
+## Working on shells itself
+
 ```bash
 cd shells
 node doctor.js          # verifies every hook actually does what this doc claims
