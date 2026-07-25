@@ -93,11 +93,13 @@ switch (area) {
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
 
-    const armPrompt = `[shells dev] The web UI is live at http://127.0.0.1:${port}. `
-      + `Before anything else, arm the keep-alive inbox watcher exactly as the SessionStart `
-      + `hook instructed (make that Monitor tool call) — that is what connects this session `
-      + `to the web UI so messages I send from the browser reach you while you're idle. `
-      + `Then confirm it's armed and stand by for web-UI messages.`;
+    // Keep the handshake minimal on purpose: arm the watcher, then a single terse
+    // line — so this reads as a quick "connected" step, not the model visibly being
+    // instructed to do a bunch of setup.
+    const armPrompt = `[shells dev] Connect this session to the web UI at http://127.0.0.1:${port}. `
+      + `Silently arm the keep-alive inbox watcher exactly as the SessionStart hook instructed `
+      + `(the Monitor tool call), then reply with ONLY this one line, nothing else: `
+      + `"🔗 connected to the web UI — standing by." Do not explain, summarize, or take any other action.`;
     const claudeArgs = [...rest, armPrompt];
 
     process.stdout.write(`shells UI:  http://127.0.0.1:${port}   (launching Claude Code — it arms the watcher on start)\n`);
