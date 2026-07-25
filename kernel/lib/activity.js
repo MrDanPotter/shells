@@ -36,6 +36,13 @@ function writeActivity(state) {
 
 // Merge a patch into the current state and write it back atomically. Every hook
 // call is read-modify-write on the same file, so this is the one place that does it.
+//
+// Not locked, on purpose. atomicWrite prevents a TORN read, not a lost update: two
+// async hooks (Subagent{Start,Stop}, PostToolUse) can each read subagents:1 and both
+// write 2, dropping an increment. That's accepted — these counters are a status-bar
+// nicety, not a source of truth, and they self-correct at the next authoritative
+// event (Stop/SessionEnd reset subagents to 0). A lock would add cross-platform file-
+// locking to a kit whose whole pitch is "just files," for a cosmetic counter.
 function patchActivity(patch) {
   const s = { ...readActivity(), ...patch };
   writeActivity(s);

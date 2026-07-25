@@ -61,7 +61,7 @@ function runShells(args, stdinObj) {
 
 function activity() { return readJson(activityFile(), {}); }
 
-// --- Phase 1: the kit surface (lib/manifest.js) -----------------------------
+// --- Kit surface / manifest (lib/manifest.js) -------------------------------
 // manifest.js is the single source of truth for what the kit IS: the scaffolder
 // vendors exactly `manifest.kit`, and package.json "files" mirrors it. These checks
 // are the tripwire that the three never drift — a kit file added but left out of the
@@ -305,6 +305,14 @@ async function watcherLiveTests() {
   check('watcher process: drains an inbox file it sees (self-deleting)',
     !fs.existsSync(path.join(inboxDir(), '0002-doctor.json')));
   check('watcher process: emits a notification line for it', childOut.includes('delivered while idle'), childOut.slice(0, 200));
+
+  // protocol.md §3: the watcher also delivers answered decision/task replies while
+  // idle (not just inbox text) — guarded by the same delivered-set as gate.js.
+  const replyId = store.create({ kind: 'task', title: 'reply delivered while idle' });
+  store.respond(replyId, { verdict: 'done' });
+  const awaitDeadline = Date.now() + 3000;
+  while (Date.now() < awaitDeadline && !childOut.includes(replyId)) await sleep(50);
+  check('watcher process: announces an answered reply while idle', childOut.includes(replyId), childOut.slice(-200));
 
   child.kill();
 }

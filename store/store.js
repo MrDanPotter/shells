@@ -3,7 +3,7 @@
 // The store INTERFACE. This file is the whole contract — swap json-store.js for a
 // beads adapter, sqlite, whatever, and everything else in this kit (hooks, the
 // reference server, doctor.js) keeps working unmodified as long as the replacement
-// exports these seven functions with these signatures. That's the point of keeping
+// exports these eight functions with these signatures. That's the point of keeping
 // it this narrow: a backend swap is a one-line require() change, not a rewrite.
 //
 //   create(input) -> id

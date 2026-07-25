@@ -96,7 +96,10 @@ ok('idempotent: exactly one .gitignore entry', giCount === 1, 'got ' + giCount);
 const shells = (args, cwd) => { try { return execFileSync(process.execPath, [path.join(V, 'shells.js'), ...args], { cwd, encoding: 'utf8' }); } catch (e) { return (e.stdout || '') + (e.stderr || ''); } };
 ok('vendored doctor passes', /All checks passed/.test(shells(['doctor'], proj)));
 ok('shells.js version prints the kit version', /shells kit \d+\.\d+\.\d+/.test(shells(['version'], proj)));
-ok('shells.js update prints npx guidance', /npx create-shells --force/.test(shells(['update'], proj)));
+ok('shells.js update prints working npx guidance', /npx create-shells \. --force/.test(shells(['update'], proj)));
+// the update flow must actually RUN, not just print — `create-shells . --force` in place
+run(['.', '--force'], proj);
+ok('update flow (create-shells . --force) re-vendors in place', exists(path.join(V, 'shells.js')) && exists(path.join(proj, '.claude', 'settings.json')));
 shells(['init'], proj);
 const settings3 = JSON.parse(read(path.join(proj, '.claude', 'settings.json')));
 const grp3 = settings3.hooks.UserPromptSubmit.filter(g => JSON.stringify(g).includes('.shells/shells.js'));

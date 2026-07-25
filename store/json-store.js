@@ -3,7 +3,7 @@
 // Default store implementation: one JSON file per message under state/messages/.
 // No beads, no database, no dependency — just files, because that is the whole
 // point of this kit. A different backend (a beads adapter, sqlite, whatever) only
-// has to export the same five functions listed in store.js.
+// has to export the same eight functions listed in store.js.
 //
 // Message shape (the entire on-disk contract for one file):
 //

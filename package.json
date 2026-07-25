@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Scaffolder + kit for driving a Claude Code session from an external front end using only lifecycle hooks and the filesystem.",
   "keywords": ["claude-code", "hooks", "scaffold", "cli", "front-end"],
+  "author": "Dan Potter <potterd64@gmail.com>",
   "license": "MIT",
   "engines": {
     "node": ">=18"

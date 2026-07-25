@@ -104,9 +104,9 @@ doctor.js                 TIER 1 — fires every hook, asserts the effect, check
    mechanism get *used* correctly: four message types, routing rules, "every turn
    pushes at least one message," `chosen` required on every decision. Paste it
    into your own project's CLAUDE.md unmodified.
-3. **Storage** (`store/`) — a narrow five-function interface
-   (`create/list/respond/markRead/resolve` + `reopen`), with one JSON-file
-   implementation. No beads here on purpose — swap `json-store.js` for a
+3. **Storage** (`store/`) — a narrow eight-function interface
+   (`create/list/get/listAwaiting/respond/markRead/resolve/reopen`), with one
+   JSON-file implementation. No beads here on purpose — swap `json-store.js` for a
    different backend later and nothing else in the repo needs to change.
 4. **Protocol + UI** (`protocol.md`, `reference/server.js`) — the front-end
    deliverable. `reference/server.js` is the **included web UI**: it ships by default
@@ -154,7 +154,7 @@ Other install commands:
 node .shells/shells.js doctor    # verify the wiring fires correctly
 node .shells/shells.js version   # what kit version is vendored
 node .shells/shells.js init      # re-apply the wiring if it drifts
-npx create-shells --force        # pull a newer kit (state + wiring untouched)
+npx create-shells . --force      # pull a newer kit (state + wiring untouched)
 ```
 
 ## Running the doctor

@@ -162,7 +162,7 @@ switch (area) {
     process.stdout.write([
       `Update the vendored kit${cur} by re-running the scaffolder from the project root:`,
       '',
-      '  npx create-shells --force',
+      '  npx create-shells . --force',
       '',
       'That re-copies the kit here from the latest published version — your',
       '.claude/settings.json, CLAUDE.md, and .shells/state/ are left untouched',
