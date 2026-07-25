@@ -9,7 +9,7 @@
 // name `shells.js` and nothing else, never an internal path like
 // kernel/hooks/gate.js. Because the integration surface depends only on this stable
 // entrypoint, shells' internals can move (into .shells/, a bundle, an npm package)
-// without the host project changing a line. See docs/scaffolder-plan.md.
+// without the host project changing a line.
 //
 // Runtime hooks are pure indirection — each subcommand calls the same module that
 // used to be its own script, which still runs standalone too (each keeps a
