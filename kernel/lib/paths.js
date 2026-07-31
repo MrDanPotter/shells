@@ -24,5 +24,11 @@ module.exports = {
   activityFile: () => path.join(stateDir(), 'activity.json'),
   deliveredFile: () => path.join(stateDir(), 'delivered.json'),
   watcherFile: () => path.join(stateDir(), 'watcher.json'),
-  chatLogFile: () => path.join(stateDir(), 'chat-log.json')
+  // The chat transcript. With no argument it's the MAIN stream; with an issue id it's
+  // that issue's own stream (state/issue-chat/<id>.json) — this is how per-issue chat
+  // reuses the whole chat model instead of forking it.
+  chatLogFile: (issue) => issue
+    ? path.join(stateDir(), 'issue-chat', String(issue) + '.json')
+    : path.join(stateDir(), 'chat-log.json'),
+  issuesDir: () => path.join(stateDir(), 'issues')
 };

@@ -43,6 +43,7 @@ const { watcherStatus } = require('../kernel/lib/watcher-status');
 const { atomicWrite, readJson } = require('../kernel/lib/atomic');
 const { seed } = require('../store/seed');
 const chat = require('../store/chat');
+const issues = require('../store/issues');
 
 // Hardcoded default is 4420 — shells' assigned port in this workspace's port
 // registry. Must never collide with another app's default; PORT is how a Fleet
@@ -103,12 +104,31 @@ function send(res, code, body, type = 'application/json') {
   res.end(data);
 }
 
-function readBody(req) {
+// Body cap. The old guard was 1MB enforced by req.destroy() — which killed the
+// socket with no status, so the browser saw a bare "Failed to fetch" with no clue
+// why. That's a strictly worse experience than a message that's simply too big
+// getting a real answer. So the cap is now 25MB (~25M characters — unreachable by
+// typing or by pasting a file) and going over it gets a proper HTTP 413 the UI can
+// show, not a dropped connection. readBody takes `res` so it can send that answer
+// before closing; it then rejects, and the top-level catch skips its own send
+// because the 413's headers are already out (res.headersSent).
+const MAX_BODY = 25 * 1024 * 1024;
+
+function readBody(req, res) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', c => { data += c; if (data.length > 25 * 1024 * 1024) req.destroy(); });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
+    let tooBig = false;
+    req.on('data', c => {
+      data += c;
+      if (data.length > MAX_BODY && !tooBig) {
+        tooBig = true;
+        if (res) send(res, 413, { error: 'message too large (over 25MB)' });   // 413 when a caller passed res
+        req.destroy();
+        reject(new Error('message too large (over 25MB)'));
+      }
+    });
+    req.on('end', () => { if (!tooBig) resolve(data); });
+    req.on('error', err => { if (!tooBig) reject(err); });
   });
 }
 
@@ -131,7 +151,38 @@ function queueInbox(text) {
 // agent-facing DELIVERY (dropInbox) carries the DOM text + the file's absolute path so
 // the agent can Read the picture; the chat DISPLAY gets a short bubble + a thumbnail URL.
 function contextDir() { return path.join(stateDir(), 'context'); }
-function saveContext({ text, note, image, selector } = {}) {
+function firstLine(s) { const t = String(s || '').trim().split('\n')[0].trim(); return t.length > 80 ? t.slice(0, 80) + '…' : t; }
+
+// Post a user turn into an ISSUE's own chat + deliver it to the agent tagged with the issue.
+function postIssueChat(issueId, text) {
+  const iss = issues.get(issueId);
+  const title = iss ? iss.title : issueId;
+  const rec = { id: chat.rid('i'), role: 'user', text, sent_at: new Date().toISOString() };
+  chat.appendChat(rec, issueId);
+  chat.dropInbox(`[issue ${issueId}: ${title}] ${text}`, issueId);
+  return rec;
+}
+
+// Open an issue from a submission (chat or inspect), announce it in the MAIN chat with a
+// clickable reference, and deliver it to the agent. dom/image/absPath/selector come from
+// the inspect tool when present.
+function openIssue({ text, dom, image, absPath, selector } = {}) {
+  const title = firstLine(text) || (selector ? 'inspect: ' + selector : 'untitled issue');
+  const iss = issues.create({ title, body: dom || text || '', image: image || null, origin: image ? 'inspect' : 'chat' });
+  const disp = { id: chat.rid('c'), role: 'user', text: '🧩 opened issue: ' + iss.title, issue: iss.id, sent_at: new Date().toISOString() };
+  if (image) disp.image = image;
+  chat.appendChat(disp);
+  const parts = ['[issue opened ' + iss.id + ': ' + iss.title + ']',
+    (text && text !== title) ? text : '', dom || '',
+    absPath ? '[screenshot attached — Read this file to see it: ' + absPath + ']' : ''];
+  chat.dropInbox(parts.filter(Boolean).join('\n\n'), iss.id);
+  return iss;
+}
+
+// A context capture from the overlay's Inspect tool: an optional cropped PNG plus the
+// element's DOM serialization. Routes three ways: open a new issue (createIssue), attach
+// to an existing issue's chat (issue), or post to the main chat (default).
+function saveContext({ text, note, image, selector, createIssue, issue } = {}) {
   const dom = String(text || '').trim();
   const noteStr = String(note || '').trim();
   let imgRel = null, absPath = null;
@@ -142,11 +193,20 @@ function saveContext({ text, note, image, selector } = {}) {
     fs.writeFileSync(absPath, Buffer.from(image.slice('data:image/png;base64,'.length), 'base64'));
     imgRel = '/api/context/' + id + '.png';
   }
-  // delivery to the agent (inbox) — full context + the path to Read
+  if (createIssue) {
+    const iss = openIssue({ text: noteStr, dom, image: imgRel, absPath, selector });
+    return { ok: true, image: imgRel, issue: iss.id };
+  }
   const delivery = [noteStr, dom, absPath ? '[screenshot attached — Read this file to see it: ' + absPath + ']' : '']
     .filter(Boolean).join('\n\n');
+  if (issue) {
+    const rec = { id: chat.rid('i'), role: 'user', text: noteStr || ('🎯 ' + (selector || 'element')), sent_at: new Date().toISOString() };
+    if (imgRel) rec.image = imgRel;
+    chat.appendChat(rec, String(issue));
+    chat.dropInbox(`[issue ${issue}] ${delivery}`, String(issue));
+    return { ok: true, image: imgRel, issue: String(issue) };
+  }
   chat.dropInbox(delivery);
-  // display in chat — a short bubble + the thumbnail
   const disp = { id: chat.rid('c'), role: 'user', text: noteStr || ('🎯 shared element ' + (selector || '')), links: [], sent_at: new Date().toISOString() };
   if (imgRel) disp.image = imgRel;
   chat.appendChat(disp);
@@ -168,7 +228,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && /^\/api\/messages\/[^/]+\/respond$/.test(p)) {
       const id = decodeURIComponent(p.split('/')[3]);
       if (!ID_RE.test(id)) return send(res, 400, { error: 'bad id' });
-      const body = JSON.parse((await readBody(req)) || '{}');
+      const body = JSON.parse((await readBody(req, res)) || '{}');
       try { return send(res, 200, store.respond(id, body)); }
       catch (e) { return send(res, 400, { error: String(e.message || e) }); }
     }
@@ -196,10 +256,45 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && p === '/api/inbox') {
+      const body = JSON.parse((await readBody(req, res)) || '{}');
+      const text = String(body.text || '').trim();
+      if (!text) return send(res, 400, { error: 'empty message' });
+      if (body.createIssue) return send(res, 200, openIssue({ text }));      // "Create an issue" checkbox
+      if (body.issue) return send(res, 200, postIssueChat(String(body.issue), text));   // an issue's chat
+      return send(res, 200, queueInbox(text));
+    }
+
+    // --- issues (first-class objects) ----------------------------------------
+
+    if (req.method === 'GET' && p === '/api/issues') {
+      return send(res, 200, issues.list({ all: url.searchParams.get('all') === '1' }));
+    }
+    if (req.method === 'POST' && p === '/api/issues') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      try { return send(res, 200, issues.create(body)); }
+      catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+    }
+    if (req.method === 'POST' && /^\/api\/issues\/[^/]+\/(close|reopen)$/.test(p)) {
+      const parts = p.split('/'); const id = decodeURIComponent(parts[3]); const action = parts[4];
+      if (!ID_RE.test(id)) return send(res, 400, { error: 'bad id' });
+      try { return send(res, 200, action === 'close' ? issues.close(id) : issues.reopen(id)); }
+      catch (e) { return send(res, 400, { error: String(e.message || e) }); }
+    }
+    // an issue's own chat stream (its per-issue transcript)
+    if (req.method === 'GET' && /^\/api\/issues\/[^/]+\/inbox$/.test(p)) {
+      return send(res, 200, chat.readChat(50, decodeURIComponent(p.split('/')[3])));
+    }
+    if (req.method === 'POST' && /^\/api\/issues\/[^/]+\/inbox$/.test(p)) {
+      const id = decodeURIComponent(p.split('/')[3]);
+      if (!ID_RE.test(id)) return send(res, 400, { error: 'bad id' });
       const body = JSON.parse((await readBody(req)) || '{}');
       const text = String(body.text || '').trim();
       if (!text) return send(res, 400, { error: 'empty message' });
-      return send(res, 200, queueInbox(text));
+      return send(res, 200, postIssueChat(id, text));
+    }
+    if (req.method === 'GET' && /^\/api\/issues\/[^/]+$/.test(p)) {
+      const iss = issues.get(decodeURIComponent(p.split('/')[3]));
+      return iss ? send(res, 200, iss) : send(res, 404, { error: 'not found' });
     }
 
     // --- activity / staleness -------------------------------------------------
@@ -228,14 +323,6 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, js, 'application/javascript');
     }
 
-    // html2canvas, vendored and lazy-loaded by the overlay's Inspect screenshot.
-    if (req.method === 'GET' && p === '/html2canvas.js') {
-      let js;
-      try { js = fs.readFileSync(path.join(__dirname, 'vendor', 'html2canvas.min.js'), 'utf8'); }
-      catch { return send(res, 404, { error: 'html2canvas not vendored' }); }
-      return send(res, 200, js, 'application/javascript');
-    }
-
     // Inspect context capture: save the cropped PNG + deliver the DOM context.
     if (req.method === 'POST' && p === '/api/context') {
       const body = JSON.parse((await readBody(req)) || '{}');
@@ -257,7 +344,9 @@ const server = http.createServer(async (req, res) => {
 
     send(res, 404, { error: 'not found' });
   } catch (e) {
-    send(res, 500, { error: String((e && e.message) || e) });
+    // readBody may have already answered (e.g. a 413 for an oversized body) before
+    // rejecting — don't write a second response over headers that are already out.
+    if (!res.headersSent) send(res, 500, { error: String((e && e.message) || e) });
   }
 });
 
@@ -346,10 +435,11 @@ const PAGE = `<!doctype html>
   .bubble.typing .d:nth-child(2) { animation-delay: .18s; }
   .bubble.typing .d:nth-child(3) { animation-delay: .36s; }
   @keyframes pgtype { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: .9; } }
-  .sendbar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
-  .sendbar input {
+  .sendbar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); align-items: flex-end; }
+  .sendbar textarea {
     font: inherit; flex: 1; padding: 9px 12px; border-radius: 10px;
     border: 1px solid var(--line); background: var(--bg); color: var(--ink);
+    resize: vertical; min-height: 40px; max-height: 40vh; line-height: 1.4;
   }
   .sendbar button {
     font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 10px;
@@ -420,7 +510,7 @@ const PAGE = `<!doctype html>
     <div class="sec-head"><h2>Chat — send to the session</h2></div>
     <div class="chat" id="chat"><div class="empty">No messages sent yet.</div></div>
     <form class="sendbar" id="sendform" autocomplete="off">
-      <input id="sendtext" placeholder="Type a message to the Claude session…" maxlength="4000">
+      <textarea id="sendtext" rows="1" placeholder="Type a message to the Claude session… (Enter sends, Shift+Enter for a new line)"></textarea>
       <button type="submit">Send</button>
     </form>
     <p class="note" id="delivery-note">Free-text goes to the session's inbox. Delivery timing depends on the watcher state shown above.</p>
@@ -724,6 +814,13 @@ const PAGE = `<!doctype html>
     try { await api('/api/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); }
     catch (err) { alert(err.message); inp.value = text; return; }
     loadChat();
+  });
+
+  // A textarea (unlike the old <input>) does NOT submit on Enter — it inserts a
+  // newline. Preserve the prior send-on-Enter behaviour, and use Shift+Enter for a
+  // deliberate newline, which is the expected convention for a chat composer.
+  $('#sendtext').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#sendform').requestSubmit(); }
   });
 
   syncTabs();

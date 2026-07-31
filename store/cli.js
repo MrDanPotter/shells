@@ -30,6 +30,7 @@
 const fs = require('fs');
 const store = require('./store');
 const chat = require('./chat');
+const issues = require('./issues');
 
 function die(msg) { console.error(msg); process.exit(1); }
 
@@ -49,6 +50,18 @@ function run(argv) {
       const id = store.create({ ...input, kind: arg });
       console.log(id);
       process.exit(0);
+    }
+
+    // Issues — first-class objects (see store/issues.js). `store issue <sub>`:
+    //   new {title, body?, links?}  | list [--all] | get <id> | close <id> | reopen <id> | link <id> <targetId>
+    if (cmd === 'issue') {
+      if (arg === 'new') { console.log(issues.create(readStdinJson()).id); process.exit(0); }
+      if (arg === 'list') { process.stdout.write(JSON.stringify(issues.list({ all: rest.includes('--all') }), null, 2) + '\n'); process.exit(0); }
+      if (arg === 'get') { const r = issues.get(rest[0]); if (!r) die(`issue: ${rest[0]} not found`); process.stdout.write(JSON.stringify(r, null, 2) + '\n'); process.exit(0); }
+      if (arg === 'close') { console.log(JSON.stringify(issues.close(rest[0]))); process.exit(0); }
+      if (arg === 'reopen') { console.log(JSON.stringify(issues.reopen(rest[0]))); process.exit(0); }
+      if (arg === 'link') { console.log(JSON.stringify(issues.addLink(rest[0], rest[1]))); process.exit(0); }
+      die('usage: store issue new|list|get|close|reopen|link');
     }
 
     // Post a short reply into the chat stream (NOT a queued message). `links` are
@@ -116,8 +129,10 @@ function run(argv) {
   echo '<json>' | node shells.js store new task          {title, body?, project?, issue_ref?}
   echo '<json>' | node shells.js store new knowledge     {title, body, project?, issue_ref?}
   echo '<json>' | node shells.js store new notification  {title, body?, project?}
-  echo '<json>' | node shells.js store say               {text, links?}
-  echo '<json>' | node shells.js store extern            {text, links?, source?}
+  echo '<json>' | node shells.js store say               {text, links?, issue?}
+  echo '<json>' | node shells.js store extern            {text, links?, source?, issue?}
+  echo '<json>' | node shells.js store issue new         {title, body?, links?}
+  node shells.js store issue list|get|close|reopen|link  (list [--all] · get/close/reopen <id> · link <id> <targetId>)
   node shells.js store list [kind] [--all]
   node shells.js store get <id>
   echo '<json>' | node shells.js store respond <id>      {verdict, response?}

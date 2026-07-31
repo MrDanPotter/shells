@@ -21,26 +21,33 @@ const CAP = 200;   // keep only the tail in the transcript; the store is the dur
 
 function rid(prefix) { return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`; }
 
-function readChat(limit) {
-  const log = readJson(chatLogFile(), []);
+// All chat functions take an optional `issue` id: omit it for the MAIN stream, pass
+// an issue id to read/write that issue's own stream. Same code, different file.
+function readChat(limit, issue) {
+  const log = readJson(chatLogFile(issue), []);
   return limit ? log.slice(-limit) : log;
 }
 
-function appendChat(rec) {
-  const log = readJson(chatLogFile(), []);
+function appendChat(rec, issue) {
+  const f = chatLogFile(issue);
+  const log = readJson(f, []);
   log.push(rec);
-  atomicWrite(chatLogFile(), JSON.stringify(log.slice(-CAP), null, 2) + '\n');
+  fs.mkdirSync(path.dirname(f), { recursive: true });   // the issue-chat/ dir on first write
+  atomicWrite(f, JSON.stringify(log.slice(-CAP), null, 2) + '\n');
   return rec;
 }
 
 // Drop a file into the delivery inbox (state/inbox/) so the watcher/gate hand the
-// text to the session. Filename ordering == arrival order (lexicographic).
-function dropInbox(text) {
+// text to the session. Filename ordering == arrival order (lexicographic). `issue`,
+// when present, is recorded so a reply can be routed back to that issue's stream.
+function dropInbox(text, issue) {
   const now = new Date().toISOString();
   const id = rid('i');
   fs.mkdirSync(inboxDir(), { recursive: true });
+  const rec = { id, text, sent_at: now };
+  if (issue) rec.issue = issue;
   atomicWrite(path.join(inboxDir(), `${now.replace(/[:.]/g, '-')}-${id}.json`),
-    JSON.stringify({ id, text, sent_at: now }, null, 2) + '\n');
+    JSON.stringify(rec, null, 2) + '\n');
   return id;
 }
 
@@ -48,7 +55,7 @@ function dropInbox(text) {
 // message ids (strings) — the front end resolves each to its kind/title and makes it
 // clickable. Kept permissive: unknown/closed ids are fine (they still resolve, or
 // degrade to a plain chip), because a link should never be able to fail a `say`.
-function say({ text, links } = {}) {
+function say({ text, links, issue } = {}) {
   const body = String(text || '').trim();
   if (!body) throw new Error('say: text is required');
   const rec = {
@@ -58,13 +65,13 @@ function say({ text, links } = {}) {
     links: Array.isArray(links) ? links.filter(x => typeof x === 'string' && x) : [],
     sent_at: new Date().toISOString()
   };
-  return appendChat(rec);
+  return appendChat(rec, issue);   // to an issue's stream when `issue` is given, else main
 }
 
 // A message injected by an agent system OUTSIDE this session's bidirectional loop —
 // not the human, not this agent. It shows in the chat stream under its own role so a
 // front end can render it distinctly. `source` optionally names the origin system.
-function external({ text, links, source } = {}) {
+function external({ text, links, source, issue } = {}) {
   const body = String(text || '').trim();
   if (!body) throw new Error('external: text is required');
   const rec = {
@@ -75,10 +82,10 @@ function external({ text, links, source } = {}) {
     links: Array.isArray(links) ? links.filter(x => typeof x === 'string' && x) : [],
     sent_at: new Date().toISOString()
   };
-  appendChat(rec);
+  appendChat(rec, issue);
   // Also DELIVER it to the session inbox so the agent can react — labeled so it is
   // never mistaken for the human. Chat keeps the clean body; delivery carries the label.
-  dropInbox(`[external-agent${rec.source ? ' · ' + rec.source : ''}] ${body}`);
+  dropInbox(`[external-agent${rec.source ? ' · ' + rec.source : ''}${issue ? ' · issue ' + issue : ''}] ${body}`, issue);
   return rec;
 }
 

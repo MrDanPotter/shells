@@ -33,10 +33,10 @@
 
   const KINDS = ['decision', 'task', 'knowledge', 'notification'];
   // The speed-dial options, ordered nearest-the-FAB first (chat), outward to the top.
-  const OPTIONS = ['chat', 'decision', 'task', 'knowledge', 'notification', 'inspect'];
-  const LABEL = { chat: 'Chat', decision: 'Decisions', task: 'Tasks', knowledge: 'Knowledge', notification: 'Notifications', inspect: 'Inspect' };
+  const OPTIONS = ['chat', 'issues', 'decision', 'task', 'knowledge', 'notification', 'inspect'];
+  const LABEL = { chat: 'Chat', issues: 'Issues', decision: 'Decisions', task: 'Tasks', knowledge: 'Knowledge', notification: 'Notifications', inspect: 'Inspect' };
   const PLURAL = { decision: 'decisions', task: 'tasks', knowledge: 'knowledge messages', notification: 'notifications' };
-  const ICON = { chat: '💬', decision: '🔀', task: '✅', knowledge: '📖', notification: '🔔', inspect: '🎯' };
+  const ICON = { chat: '💬', issues: '🧩', decision: '🔀', task: '✅', knowledge: '📖', notification: '🔔', inspect: '🎯' };
 
   // ---- styles (scoped to the shadow root) ----------------------------------
   const CSS = `
@@ -70,6 +70,24 @@
     .menu.open .opt:nth-child(4) { transition-delay: .12s; }
     .menu.open .opt:nth-child(5) { transition-delay: .16s; }
     .menu.open .opt:nth-child(6) { transition-delay: .20s; }
+    .menu.open .opt:nth-child(7) { transition-delay: .24s; }
+
+    /* ---- issues ---- */
+    .iss-row { padding: 12px 16px; border-bottom: 1px solid #e6e8ec; border-left: 3px solid #b5651d; cursor: pointer; }
+    .iss-row:hover { background: #f6f7f9; }
+    .iss-row.closed { opacity: .55; border-left-color: #667085; }
+    .iss-row .t { font-weight: 600; }
+    .iss-row .m { font-size: 12px; color: #667085; margin-top: 3px; }
+    .iss-back { border: 0; background: none; color: #3b6ef5; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; padding: 8px 14px; }
+    .iss-head { padding: 4px 16px 12px; border-bottom: 1px solid #e6e8ec; }
+    .iss-head .t { font-weight: 700; font-size: 15px; }
+    .iss-head .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+    .iss-pill { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+    .iss-pill.open { background: #fde8d5; color: #b5651d; } .iss-pill.closed { background: #e6e8ec; color: #667085; }
+    .iss-head .desc { white-space: pre-wrap; word-break: break-word; margin-top: 9px; font-size: 13px; color: #1b1f24; }
+    .iss-head button.act { margin-left: auto; font: inherit; font-size: 12.5px; padding: 4px 11px; border-radius: 8px; border: 1px solid #e6e8ec; background: #f6f7f9; color: #1b1f24; cursor: pointer; }
+    .mkissue { display: flex; align-items: center; gap: 6px; padding: 0 14px 10px; font-size: 12.5px; color: #667085; user-select: none; cursor: pointer; }
+    .mkissue input { margin: 0; }
 
     /* ---- inspect (click-to-discuss) ---- */
     .ins-hl { position: fixed; z-index: 2147483002; pointer-events: none; display: none; box-sizing: border-box;
@@ -205,6 +223,11 @@
       .bubble.external { background: #b5433f; }
       .chip { background: #0f1216; color: #e6e9ee; border-color: #262c34; }
       .mhead .tochat { background: #0f1216; color: #e6e9ee; border-color: #262c34; }
+      .iss-row, .iss-head { border-color: #262c34; } .iss-row:hover { background: #0f1216; }
+      .iss-row .m, .iss-head .desc, .mkissue { color: #9aa4b2; }
+      .iss-head .desc { color: #e6e9ee; }
+      .iss-pill.open { background: #3a2a17; color: #e0a267; } .iss-pill.closed { background: #0f1216; color: #9aa4b2; }
+      .iss-head button.act { background: #0f1216; color: #e6e9ee; border-color: #262c34; }
     }
   `;
 
@@ -253,6 +276,8 @@
   let lastSig = '', lastChatSig = '', highlightId = null;
   let activityState = '';   // reported_state from /api/activity — drives the working spinner + typing dots
   let pendingScrollBottom = false;   // force the chat to the bottom once, after it opens and becomes visible
+  let currentIssue = null, issuesList = [], lastIssuesSig = '';   // issues: list + the one being viewed
+  let issueChat = [], lastIssueChatSig = '';
   let holdUntil = 0; const HOLD_MS = 1200;
   const bumpHold = () => { holdUntil = Date.now() + HOLD_MS; };
   const openOf = kind => messages.filter(m => m.kind === kind && m.status !== 'closed');
@@ -439,6 +464,10 @@
     const shot = el('div', 'shot', 'capturing…');           // preview of what's being attached
     insPop.appendChild(shot);
     insPop.appendChild(el('div', 'sel', insSelector(target)));
+    const mkLbl = el('label', 'mkissue');
+    const mk = el('input'); mk.type = 'checkbox';
+    mkLbl.append(mk, document.createTextNode('Create an issue'));
+    insPop.appendChild(mkLbl);
     const ta = el('textarea'); ta.placeholder = 'What about this element? (optional)';
     insPop.appendChild(ta);
     const row = el('div', 'row');
@@ -449,22 +478,25 @@
       const note = ta.value.trim();
       const domText = insContext(target);
       const selector = insSelector(target);
+      const mkIssue = mk.checked;
       go.disabled = true;
-      let sent = false;
+      let sent = false, issueId = null;
       // Preferred path: the context endpoint (saves the screenshot + delivers the DOM).
       try {
-        await api('/api/context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: domText, note, image: imageData, selector }) });
-        sent = true;
+        const r = await api('/api/context', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: domText, note, image: imageData, selector, createIssue: mkIssue }) });
+        sent = true; if (mkIssue && r && r.issue) issueId = r.issue;
       } catch (e) { /* server may not have /api/context — fall back to a plain inbox message */ }
       if (!sent) {
         try {
-          await api('/api/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: (note ? note + '\n\n' : '') + domText }) });
+          const r = await api('/api/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: (note ? note + '\n\n' : '') + domText, createIssue: mkIssue }) });
+          if (mkIssue && r && r.id) issueId = r.id;
         } catch (err) { alert(err.message); go.disabled = false; return; }
       }
       stopInspect();
-      lastChatSig = ''; openModal('chat');
+      if (issueId) { openModal('issues'); openIssueDetail(issueId); }
+      else { lastChatSig = ''; openModal('chat'); }
     };
     cancel.onclick = () => stopInspect();
     row.append(go, cancel); insPop.appendChild(row);
@@ -509,10 +541,12 @@
     $('.mtitle').textContent = LABEL[key];
     $('.tochat').style.display = key === 'chat' ? 'none' : '';   // "back to chat" everywhere but chat
     if (key === 'chat') pendingScrollBottom = true;              // land at the newest message on open
+    if (key === 'issues') { currentIssue = null; lastIssuesSig = ''; }
     lastSig = ''; lastChatSig = '';
     renderModal(true);
     backdrop.classList.add('show');
     if (key === 'chat') loadChat();
+    if (key === 'issues') loadIssues();
   }
   function closeModal() { currentModal = null; highlightId = null; backdrop.classList.remove('show'); mbody.textContent = ''; }
 
@@ -553,6 +587,7 @@
   function renderModal(force) {
     if (!currentModal) return;
     if (currentModal === 'chat') return renderChat();
+    if (currentModal === 'issues') return renderIssues(force);
     if (!force && (editing() || Date.now() < holdUntil)) { setTimeout(() => renderModal(false), 400); return; }
     let shown = openOf(currentModal);
     // If we're jumping to a specific item that happens to be closed (e.g. a link to
@@ -598,35 +633,54 @@
   }
 
   // ---- chat -----------------------------------------------------------------
-  function renderChat() {
-    const atBottom = mbody.scrollHeight - mbody.scrollTop - mbody.clientHeight < 60;
-    mbody.textContent = '';
-    const log = el('div', 'chat-log');
-    if (!chatLog.length) log.appendChild(el('div', 'empty', 'No messages yet.'));
-    else chatLog.forEach(r => {
-      const roleCls = r.role === 'agent' ? 'agent' : r.role === 'external-agent' ? 'external' : 'you';
-      const b = el('div', 'bubble ' + roleCls);
-      if (r.role === 'external-agent') b.appendChild(el('span', 'src', r.source ? ('external · ' + r.source) : 'external agent'));
-      b.appendChild(document.createTextNode(r.text));
-      const t = new Date(r.sent_at); b.appendChild(el('span', 'when', isNaN(t) ? '' : t.toLocaleTimeString()));
-      if (r.links && r.links.length) b.appendChild(chipRow(r.links));
-      if (r.image) { const im = el('img'); im.className = 'chat-shot'; im.src = BASE + r.image; b.appendChild(im); }
-      log.appendChild(b);
-    });
-    mbody.appendChild(log);
+  // One chat bubble element — shared by the main chat and each issue's own chat.
+  function bubbleEl(r) {
+    const roleCls = r.role === 'agent' ? 'agent' : r.role === 'external-agent' ? 'external' : 'you';
+    const b = el('div', 'bubble ' + roleCls);
+    if (r.role === 'external-agent') b.appendChild(el('span', 'src', r.source ? ('external · ' + r.source) : 'external agent'));
+    b.appendChild(document.createTextNode(r.text));
+    const t = new Date(r.sent_at); b.appendChild(el('span', 'when', isNaN(t) ? '' : t.toLocaleTimeString()));
+    if (r.links && r.links.length) b.appendChild(chipRow(r.links));
+    if (r.image) { const im = el('img'); im.className = 'chat-shot'; im.src = BASE + r.image; b.appendChild(im); }
+    return b;
+  }
+
+  // A composer that POSTs {text} to `endpoint` then calls `after`. With `withIssue`,
+  // it adds a "Create an issue" checkbox — ticked, the message opens an issue instead.
+  function composer(endpoint, after, withIssue) {
+    const wrap = el('div');
+    let mk = null;
+    if (withIssue) {
+      const lbl = el('label', 'mkissue');
+      mk = el('input'); mk.type = 'checkbox';
+      lbl.append(mk, document.createTextNode('Create an issue from this message'));
+      wrap.appendChild(lbl);
+    }
     const comp = el('div', 'composer');
     const ta = el('textarea'); ta.placeholder = 'Message the session… (Enter sends, Shift+Enter = newline)';
     const send = el('button', null, 'Send');
     const doSend = async () => {
       const text = ta.value.trim(); if (!text) return; ta.value = '';
-      try { await api('/api/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); }
+      const payload = { text }; if (mk && mk.checked) payload.createIssue = true;
+      try { await api(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); }
       catch (e) { alert(e.message); ta.value = text; return; }
-      lastChatSig = ''; loadChat();
+      if (mk) mk.checked = false;
+      after();
     };
     ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
     send.addEventListener('click', doSend);
-    comp.append(ta, send);
-    mbody.appendChild(comp);
+    comp.append(ta, send); wrap.appendChild(comp);
+    return wrap;
+  }
+
+  function renderChat() {
+    const atBottom = mbody.scrollHeight - mbody.scrollTop - mbody.clientHeight < 60;
+    mbody.textContent = '';
+    const log = el('div', 'chat-log');
+    if (!chatLog.length) log.appendChild(el('div', 'empty', 'No messages yet.'));
+    else chatLog.forEach(r => log.appendChild(bubbleEl(r)));
+    mbody.appendChild(log);
+    mbody.appendChild(composer('/api/inbox', () => { lastChatSig = ''; loadChat(); }, true));
     updateTyping();
     if (pendingScrollBottom) {
       mbody.scrollTop = mbody.scrollHeight;
@@ -653,6 +707,74 @@
     } else if (!working && has) {
       has.remove();
     }
+  }
+
+  // ---- issues ---------------------------------------------------------------
+  async function loadIssues() {
+    let list; try { list = await api('/api/issues?all=1'); } catch { return; }
+    issuesList = list;
+    if (currentModal === 'issues' && !currentIssue) renderIssues();
+  }
+  function renderIssues(force) {
+    if (currentIssue) return renderIssueDetail();
+    const sig = JSON.stringify(issuesList.map(i => [i.id, i.status, i.title, i.updated_at]));
+    if (!force && sig === lastIssuesSig) return;
+    lastIssuesSig = sig;
+    $('.mtitle').textContent = 'Issues';
+    mbody.textContent = '';
+    if (!issuesList.length) { mbody.appendChild(el('div', 'empty', 'No issues yet. Tick "Create an issue" in chat or the inspect popover to open one.')); return; }
+    const open = issuesList.filter(i => i.status !== 'closed');
+    const closed = issuesList.filter(i => i.status === 'closed');
+    [...open, ...closed].forEach(i => {
+      const row = el('div', 'iss-row' + (i.status === 'closed' ? ' closed' : ''));
+      row.appendChild(el('div', 't', i.title));
+      row.appendChild(el('div', 'm', i.status + (i.origin ? ' · from ' + i.origin : '') + (i.links && i.links.length ? ' · ' + i.links.length + ' link(s)' : '')));
+      row.onclick = () => openIssueDetail(i.id);
+      mbody.appendChild(row);
+    });
+  }
+  function openIssueDetail(id) {
+    currentIssue = id; issueChat = []; lastIssueChatSig = '';
+    renderIssueDetail();
+    loadIssueChat();
+  }
+  async function loadIssueChat() {
+    if (!currentIssue) return;
+    let log; try { log = await api('/api/issues/' + encodeURIComponent(currentIssue) + '/inbox'); } catch { return; }
+    const sig = JSON.stringify(log.map(r => [r.id, r.role || 'user', r.image || '']));
+    if (sig === lastIssueChatSig) return;
+    lastIssueChatSig = sig; issueChat = log;
+    if (currentModal === 'issues' && currentIssue) renderIssueDetail();
+  }
+  function renderIssueDetail() {
+    const iss = issuesList.find(i => i.id === currentIssue);
+    $('.mtitle').textContent = 'Issue';
+    mbody.textContent = '';
+    const back = el('button', 'iss-back', '‹ All issues');
+    back.onclick = () => { currentIssue = null; lastIssuesSig = ''; renderIssues(true); };
+    mbody.appendChild(back);
+    const head = el('div', 'iss-head');
+    head.appendChild(el('div', 't', iss ? iss.title : currentIssue));
+    const row = el('div', 'row');
+    row.appendChild(el('span', 'iss-pill ' + (iss && iss.status === 'closed' ? 'closed' : 'open'), iss ? iss.status : '…'));
+    const toggle = el('button', 'act', iss && iss.status === 'closed' ? 'Reopen' : 'Close');
+    toggle.onclick = async () => {
+      const action = iss && iss.status === 'closed' ? 'reopen' : 'close';
+      try { await api('/api/issues/' + encodeURIComponent(currentIssue) + '/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }
+      catch (e) { alert(e.message); return; }
+      lastIssuesSig = ''; await loadIssues(); renderIssueDetail();
+    };
+    row.appendChild(toggle);
+    head.appendChild(row);
+    if (iss && iss.body) head.appendChild(el('div', 'desc', iss.body));
+    if (iss && iss.image) { const im = el('img'); im.className = 'chat-shot'; im.style.marginTop = '9px'; im.src = BASE + iss.image; head.appendChild(im); }
+    mbody.appendChild(head);
+    const log = el('div', 'chat-log');
+    if (!issueChat.length) log.appendChild(el('div', 'empty', 'No discussion yet.'));
+    else issueChat.forEach(r => log.appendChild(bubbleEl(r)));
+    mbody.appendChild(log);
+    mbody.appendChild(composer('/api/issues/' + encodeURIComponent(currentIssue) + '/inbox', () => { lastIssueChatSig = ''; loadIssueChat(); }, false));
+    mbody.scrollTop = mbody.scrollHeight;
   }
 
   // ---- data loaders ---------------------------------------------------------
@@ -700,5 +822,8 @@
 
   loadMessages(true); loadStatus();
   setInterval(() => { loadMessages(false); loadStatus(); }, 2500);
-  setInterval(() => { if (currentModal === 'chat') loadChat(); }, 2500);
+  setInterval(() => {
+    if (currentModal === 'chat') loadChat();
+    else if (currentModal === 'issues') { if (currentIssue) loadIssueChat(); else loadIssues(); }
+  }, 2500);
 })();

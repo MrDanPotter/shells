@@ -48,10 +48,30 @@ through `shells.js store new <kind>`.
   with no reply. That one-wayness is what keeps the decision queue small and
   trustworthy: it never accumulates things that don't actually need a decision.
 
-**The tell:** if your message ends by asking someone to confirm, choose, verify,
-or say the word, it is a decision. A notification ends with nothing required of
-anyone. When in doubt, apply this test directly to your own draft text before you
-pick the type.
+**The tell:** an *ask* — any sentence that wants the reader to confirm, choose,
+verify, approve, merge, or "say the word" — is a decision. A notification asks
+nothing of anyone. Apply this to the draft text itself, sentence by sentence,
+before you pick a type.
+
+## Route each ask, not the whole message
+
+Pick the type per *ask*, never from the bulk of the message. The leak is
+seductive and specific: a long write-up is "90% a status report," so it goes out
+as knowledge — and the one paragraph that needed an answer rides along with the
+90% into a one-way channel, closes on being read, and dies having been seen by no
+one who could act on it. "Mostly a report" is not "a report."
+
+So before you push anything as **knowledge** or **notification**, re-read the
+draft for any sentence that asks the reader to confirm, choose, verify, approve,
+merge, or say the word. Each one you find gets split into its own **decision**
+with a default already taken (see `chosen` below). The right shape for a batch of
+work is a report **plus** one short separate decision per ask — not a single
+combined message. A report with no asks in it stays one message; the splitting is
+only for the asks hiding inside it.
+
+This gets harder as batches grow — the more you sweep into one write-up, the
+better an ask hides in it. When in doubt, surface asks as they arise instead of
+banking them into an end-of-run summary.
 
 ## `chosen` is required on every decision
 
