@@ -144,6 +144,16 @@ async function waitReady(timeoutMs) {
     ok('POST /p/<key>/api/session/launch launches (default cmd = claude)',
       sess.ok && sessBody.launched === true && sessBody.cmd === 'claude', JSON.stringify(sessBody));
 
+    // restart: kills the app's port (unreachable here) then respawns the (no-op) command
+    const restart = await fetch(`${ORIGIN}/p/${KEY}/api/app/restart`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const rb = await restart.json();
+    ok('POST /p/<key>/api/app/restart force-restarts', restart.ok && rb.restarted === true, JSON.stringify(rb));
+
+    // focus: returns a boolean (false here — no such terminal window / non-Windows)
+    const focus = await fetch(`${ORIGIN}/p/${KEY}/api/session/focus`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const fb = await focus.json();
+    ok('POST /p/<key>/api/session/focus returns a focused flag', focus.ok && typeof fb.focused === 'boolean', JSON.stringify(fb));
+
     // the hub is the PRIMARY page: with a project registered, the ROOT serves the fleet.
     // Discriminate on markers unique to each page: the hub's grid vs the client's send
     // form (both pages reference /hub/api/projects, so that string can't tell them apart).

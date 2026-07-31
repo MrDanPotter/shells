@@ -258,6 +258,33 @@ function openTerminal(cmd, cwd, title) {
   child.unref();
 }
 
+// Spawn a project's app dev server (detached) with a cleaned env plus the hub's
+// namespaced overlay URL for this project. Shared by launch + restart.
+function spawnApp(e, key) {
+  const childEnv = { ...process.env };
+  for (const k of ['PORT', 'HOST', 'SHELLS_STATE_DIR', 'SHELLS_HOME']) delete childEnv[k];
+  childEnv.SHELLS_OVERLAY_URL = `http://${HOST}:${PORT}/p/${key}/overlay.js`;
+  childEnv.SHELLS_PORT = String(PORT);
+  childEnv.SHELLS_KEY = key;
+  const child = require('child_process').spawn(e.app.cmd, { cwd: e.root, shell: true, detached: true, stdio: 'ignore', env: childEnv });
+  child.on('error', () => {});
+  child.unref();
+}
+
+function portOf(url) { try { const u = new URL(url); return u.port || (u.protocol === 'https:' ? '443' : '80'); } catch { return ''; } }
+
+// Force-kill whatever is listening on a port — used to shut a wedged app down before a
+// restart. Best-effort + OS-specific; errors are ignored (maybe nothing was running).
+function killPort(port) {
+  return new Promise(resolve => {
+    if (!port) return resolve();
+    const cmd = process.platform === 'win32'
+      ? `powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"`
+      : `lsof -ti tcp:${port} | xargs -r kill -9`;
+    require('child_process').exec(cmd, { windowsHide: true }, () => resolve());
+  });
+}
+
 // --- the hub fleet view: aggregate every registered project's state -----------
 // The shared server already reads each project's state dir to serve /p/<key>/, so a
 // cross-project overview costs nothing extra: for each registered project, read its
@@ -314,28 +341,29 @@ async function handle(req, res, p, url, key) {
       if (!app || !app.cmd) return send(res, 400, { error: 'no app command configured (set one with: shells.js register --app-cmd "…" --app-url "…")' });
       const already = app.url ? await appReachable(app.url) : false;
       if (!already) {
-        try {
-          // Launch with a CLEANED env. This server runs with PORT/HOST/SHELLS_STATE_DIR/
-          // SHELLS_HOME set for ITSELF; leaking them into the app makes it bind the hub's
-          // port (or read the hub's state) instead of its own — e.g. `PORT=4460` would
-          // send an app that defaults to :3000 straight into a collision with the hub.
-          // Strip them so the app runs exactly as it would if you ran its dev command.
-          const childEnv = { ...process.env };
-          for (const k of ['PORT', 'HOST', 'SHELLS_STATE_DIR', 'SHELLS_HOME']) delete childEnv[k];
-          // Tell the app where THIS hub's overlay for THIS project is, so its dev-only
-          // injection wires the overlay to /p/<key>/ on the hub — not a bare /overlay.js
-          // on whatever server happens to sit on the default port. An app should inject
-          // SHELLS_OVERLAY_URL when present; SHELLS_PORT/SHELLS_KEY are there for apps
-          // that build the URL themselves.
-          childEnv.SHELLS_OVERLAY_URL = `http://${HOST}:${PORT}/p/${key}/overlay.js`;
-          childEnv.SHELLS_PORT = String(PORT);
-          childEnv.SHELLS_KEY = key;
-          const child = require('child_process').spawn(app.cmd, { cwd: e.root, shell: true, detached: true, stdio: 'ignore', env: childEnv });
-          child.on('error', () => { /* surfaced to the client via the next reachability poll */ });
-          child.unref();                         // let the dev server outlive this request/server
-        } catch (err) { return send(res, 500, { error: 'launch failed: ' + ((err && err.message) || err) }); }
+        try { spawnApp(e, key); }
+        catch (err) { return send(res, 500, { error: 'launch failed: ' + ((err && err.message) || err) }); }
       }
       return send(res, 200, { launched: !already, running: already, url: app.url || '' });
+    }
+
+    // Force-shut the app (kill whatever holds its port) and start it fresh — for when the
+    // dev server wedges. The port comes from the registered app.url, never the request.
+    if (req.method === 'POST' && p === '/api/app/restart') {
+      const e = key ? registry.get(key) : null;
+      const app = e && e.app;
+      if (!app || !app.cmd) return send(res, 400, { error: 'no app command configured' });
+      await killPort(portOf(app.url));
+      await new Promise(r => setTimeout(r, 800));   // let the port free before rebinding
+      try { spawnApp(e, key); } catch (err) { return send(res, 500, { error: 'restart failed: ' + ((err && err.message) || err) }); }
+      return send(res, 200, { restarted: true, url: app.url || '' });
+    }
+    // Just shut the app down (no relaunch).
+    if (req.method === 'POST' && p === '/api/app/stop') {
+      const e = key ? registry.get(key) : null;
+      if (!e || !e.app) return send(res, 400, { error: 'no app configured' });
+      await killPort(portOf(e.app.url));
+      return send(res, 200, { stopped: true });
     }
 
     // Start this project's Claude session in a new terminal. The command comes from the
@@ -348,6 +376,21 @@ async function handle(req, res, p, url, key) {
       try { openTerminal(cmd, e.root, 'shells: ' + e.name); }
       catch (err) { return send(res, 500, { error: 'session launch failed: ' + ((err && err.message) || err) }); }
       return send(res, 200, { launched: true, cmd, cwd: e.root });
+    }
+    // Best-effort: bring the session's terminal window to the front. On Windows we
+    // activate the window by the title we set at launch ('shells: <name>'); if the
+    // running program has since overwritten that title, it may not be found (focused:
+    // false). Not supported off Windows.
+    if (req.method === 'POST' && p === '/api/session/focus') {
+      const e = key ? registry.get(key) : null;
+      if (!e) return send(res, 400, { error: 'unknown project' });
+      if (process.platform !== 'win32') return send(res, 200, { focused: false, reason: 'focus is only supported on Windows' });
+      const title = ('shells: ' + e.name).replace(/'/g, "''");   // '' escapes a quote in a PS single-quoted string
+      const focused = await new Promise(resolve => {
+        const ps = `$ok=(New-Object -ComObject WScript.Shell).AppActivate('${title}'); if(-not $ok){exit 3}`;
+        require('child_process').exec(`powershell -NoProfile -Command "${ps}"`, { windowsHide: true }, err => resolve(!err));
+      });
+      return send(res, 200, { focused });
     }
 
     // --- messages -----------------------------------------------------------
@@ -533,6 +576,7 @@ const PAGE = `<!doctype html>
     --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #667085;
     --line: #e6e8ec; --accent: #3b6ef5; --accent-ink: #ffffff;
     --decision: #b5651d; --task: #2f855a; --knowledge: #6b46c1; --notification: #667085;
+    --issue: #0d9488;
     --ok: #2f855a; --warn: #b7791f; --bad: #c53030;
     --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.10);
   }
@@ -541,6 +585,7 @@ const PAGE = `<!doctype html>
       --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --muted: #9aa4b2;
       --line: #262c34; --accent: #5b86f7; --accent-ink: #0f1216;
       --decision: #e0a267; --task: #6ee7a8; --knowledge: #b794f6; --notification: #9aa4b2;
+      --issue: #2dd4bf;
       --ok: #6ee7a8; --warn: #e8c37e; --bad: #f28b82;
       --shadow: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px rgba(0,0,0,.4);
     }
@@ -573,6 +618,11 @@ const PAGE = `<!doctype html>
   .sessbtn:hover { border-color: var(--accent); }
   .sessbtn:disabled { cursor: default; }
   .sessbtn.live { color: var(--ok); border-color: var(--ok); }
+  /* force shutdown+restart of the app dev server — bordered, warn-tinted */
+  .apprestart { display: none; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    color: var(--warn); background: var(--bg); border: 1px solid var(--line); padding: 5px 12px; border-radius: 999px; }
+  .apprestart:hover { border-color: var(--warn); }
+  .apprestart:disabled { opacity: .6; cursor: default; }
   .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; align-items: center; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -645,6 +695,7 @@ const PAGE = `<!doctype html>
   .tab.k-task.active { border-bottom-color: var(--task); }
   .tab.k-knowledge.active { border-bottom-color: var(--knowledge); }
   .tab.k-notification.active { border-bottom-color: var(--notification); }
+  .tab.k-issue.active { border-bottom-color: var(--issue); }
   .badge {
     font-size: 11px; font-weight: 700; min-width: 18px; text-align: center;
     padding: 1px 6px; border-radius: 999px; background: var(--bg); color: var(--muted); border: 1px solid var(--line);
@@ -679,6 +730,29 @@ const PAGE = `<!doctype html>
     border: 1px solid var(--line); background: var(--panel); color: var(--ink); flex: 1; min-width: 140px;
   }
   .empty { padding: 24px 16px; color: var(--muted); text-align: center; font-size: 13.5px; }
+
+  /* issues — a first-class object: a list, then per-issue detail + its own chat */
+  .iss-row { padding: 13px 16px; border-bottom: 1px solid var(--line); border-left: 3px solid var(--issue); cursor: pointer; }
+  .iss-row:last-child { border-bottom: 0; }
+  .iss-row:hover { background: var(--bg); }
+  .iss-row.closed { opacity: .55; border-left-color: var(--muted); }
+  .iss-row .t { font-weight: 600; }
+  .iss-row .m { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .iss-back { border: 0; background: none; color: var(--accent); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; padding: 12px 16px 2px; }
+  .iss-head { padding: 6px 16px 14px; border-bottom: 1px solid var(--line); }
+  .iss-head .t { font-weight: 700; font-size: 16px; }
+  .iss-head .row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .iss-pill { font-size: 11.5px; font-weight: 700; padding: 2px 9px; border-radius: 999px; text-transform: uppercase; letter-spacing: .04em; }
+  .iss-pill.open { background: rgba(13,148,136,.15); color: var(--issue); }
+  .iss-pill.closed { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+  .iss-head .desc { white-space: pre-wrap; word-break: break-word; margin-top: 10px; font-size: 13.5px; color: var(--ink); }
+  .iss-head button.act { margin-left: auto; font: inherit; font-size: 12.5px; padding: 4px 11px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+  .iss-head button.act:hover { border-color: var(--accent); }
+  .iss-chat { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; max-height: 42vh; overflow-y: auto; }
+  .iss-compose { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); align-items: flex-end; }
+  .iss-compose textarea { font: inherit; flex: 1; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--ink); resize: vertical; min-height: 40px; max-height: 30vh; line-height: 1.4; }
+  .iss-compose button { font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 10px; border: 0; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
 </style>
 
 <header>
@@ -686,6 +760,7 @@ const PAGE = `<!doctype html>
   <h1>shells <span class="dim" id="whoami">reference client</span></h1>
   <button class="sessbtn" id="sessbtn" title="Start this project's Claude session in a new terminal">▶ Launch session</button>
   <button class="appbtn" id="appbtn" title="Launch this project's app in dev mode and open it">▶ Open app</button>
+  <button class="apprestart" id="apprestart" title="Force-stop the app server and start it fresh">↻ Restart app</button>
   <div class="pills">
     <span class="pill" id="pill-activity"><span class="dot" id="dot-activity"></span><span id="txt-activity">…</span></span>
     <span class="pill" id="pill-watcher"><span class="dot" id="dot-watcher"></span><span id="txt-watcher">…</span></span>
@@ -710,6 +785,7 @@ const PAGE = `<!doctype html>
       <button class="tab k-task" data-kind="task">Tasks <span class="badge">0</span></button>
       <button class="tab k-knowledge" data-kind="knowledge">Knowledgebase <span class="badge">0</span></button>
       <button class="tab k-notification" data-kind="notification">Notifications <span class="badge">0</span></button>
+      <button class="tab k-issue" data-kind="issues">Issues <span class="badge">0</span></button>
     </div>
     <div class="tab-tools"><button class="toggle" id="toggle-closed">show closed</button></div>
     <div id="messages"><div class="empty">Loading…</div></div>
@@ -738,6 +814,8 @@ const PAGE = `<!doctype html>
   const bumpHold = () => { holdUntil = Date.now() + HOLD_MS; };
   let lastMsgSig = '', showClosed = false, catchupTimer = null;
   let activeKind = 'decision', pickedInitialTab = false;
+  // issues: the list, the one being viewed, and its own chat stream
+  let issuesList = [], currentIssue = null, issueChat = [], lastIssuesSig = '', lastIssueChatSig = '';
 
   function editingMessages() {
     const a = document.activeElement;
@@ -859,6 +937,8 @@ const PAGE = `<!doctype html>
       syncTabs();
     }
 
+    if (activeKind === 'issues') return;   // issues own #messages; badges/snapshot above still update
+
     const shown = list.filter(m => m.kind === activeKind && (showClosed || m.status !== 'closed'));
     const sig = activeKind + '|' + showClosed + '|' + JSON.stringify(shown.map(m => [m.id, m.status, m.updated_at, m.response]));
     if (sig === lastMsgSig) { applyFlash(); return; }   // content unchanged, but a flash may be pending
@@ -899,6 +979,91 @@ const PAGE = `<!doctype html>
       return;
     }
     try { renderMessages(await api('/api/messages?all=1')); } catch {}
+  }
+
+  // --- issues (first-class objects): list -> detail + per-issue chat, open/close ----
+  function issuesBadge() {
+    const badge = document.querySelector('.tab[data-kind="issues"] .badge');
+    const n = String(issuesList.filter(i => i.status !== 'closed').length);
+    if (badge && badge.textContent !== n) badge.textContent = n;
+  }
+  async function loadIssues(force) {
+    let list; try { list = await api('/api/issues?all=1'); } catch { return; }
+    issuesList = list; issuesBadge();
+    if (activeKind === 'issues') renderIssues(force);
+  }
+  function renderIssues(force) {
+    if (currentIssue) return renderIssueDetail();
+    const sig = JSON.stringify(issuesList.map(i => [i.id, i.status, i.title, i.updated_at]));
+    if (!force && sig === lastIssuesSig) return;
+    lastIssuesSig = sig;
+    const box = $('#messages'); box.textContent = '';
+    if (!issuesList.length) { box.appendChild(el('div', 'empty', 'No issues yet. Create one from the chat or the inspect tool in the overlay.')); return; }
+    const open = issuesList.filter(i => i.status !== 'closed');
+    const closed = issuesList.filter(i => i.status === 'closed');
+    [...open, ...closed].forEach(i => {
+      const row = el('div', 'iss-row' + (i.status === 'closed' ? ' closed' : ''));
+      row.appendChild(el('div', 't', i.title));
+      row.appendChild(el('div', 'm', i.status + (i.origin ? ' · from ' + i.origin : '') + (i.links && i.links.length ? ' · ' + i.links.length + ' link(s)' : '')));
+      row.onclick = () => openIssueDetail(i.id);
+      box.appendChild(row);
+    });
+  }
+  function openIssueDetail(id) { currentIssue = id; issueChat = []; lastIssueChatSig = ''; renderIssueDetail(); loadIssueChat(); }
+  async function loadIssueChat() {
+    if (!currentIssue) return;
+    let log; try { log = await api('/api/issues/' + encodeURIComponent(currentIssue) + '/inbox'); } catch { return; }
+    const sig = JSON.stringify(log.map(r => [r.id, r.role || 'user']));
+    if (sig === lastIssueChatSig) return;
+    lastIssueChatSig = sig; issueChat = log;
+    if (activeKind === 'issues' && currentIssue) renderIssueDetail();
+  }
+  function issueBubble(r) {
+    const roleCls = r.role === 'agent' ? 'agent' : r.role === 'external-agent' ? 'external' : 'you';
+    const b = el('div', 'bubble ' + roleCls);
+    if (r.role === 'external-agent') b.appendChild(el('span', 'src', r.source ? ('external · ' + r.source) : 'external agent'));
+    b.appendChild(document.createTextNode(r.text));
+    const t = new Date(r.sent_at); b.appendChild(el('span', 'when', isNaN(t) ? '' : t.toLocaleTimeString()));
+    return b;
+  }
+  function renderIssueDetail() {
+    const iss = issuesList.find(i => i.id === currentIssue);
+    const box = $('#messages'); box.textContent = '';
+    const back = el('button', 'iss-back', '‹ All issues');
+    back.onclick = () => { currentIssue = null; lastIssuesSig = ''; renderIssues(true); };
+    box.appendChild(back);
+    const head = el('div', 'iss-head');
+    head.appendChild(el('div', 't', iss ? iss.title : currentIssue));
+    const row = el('div', 'row');
+    row.appendChild(el('span', 'iss-pill ' + (iss && iss.status === 'closed' ? 'closed' : 'open'), iss ? iss.status : '…'));
+    const toggle = el('button', 'act', iss && iss.status === 'closed' ? 'Reopen' : 'Close');
+    toggle.onclick = async () => {
+      const action = iss && iss.status === 'closed' ? 'reopen' : 'close';
+      try { await api('/api/issues/' + encodeURIComponent(currentIssue) + '/' + action, { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }
+      catch (e) { alert(e.message); return; }
+      lastIssuesSig = ''; await loadIssues(true); renderIssueDetail();
+    };
+    row.appendChild(toggle);
+    head.appendChild(row);
+    if (iss && iss.body) head.appendChild(el('div', 'desc', iss.body));
+    box.appendChild(head);
+    const log = el('div', 'iss-chat');
+    if (!issueChat.length) log.appendChild(el('div', 'empty', 'No discussion yet.'));
+    else issueChat.forEach(r => log.appendChild(issueBubble(r)));
+    box.appendChild(log);
+    const comp = el('div', 'iss-compose');
+    const ta = el('textarea'); ta.placeholder = 'Message this issue… (Enter sends, Shift+Enter for a new line)';
+    const send = el('button', null, 'Send');
+    const doSend = async () => {
+      const text = ta.value.trim(); if (!text) return; ta.value = '';
+      try { await api('/api/issues/' + encodeURIComponent(currentIssue) + '/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }); }
+      catch (e) { alert(e.message); ta.value = text; return; }
+      lastIssueChatSig = ''; loadIssueChat();
+    };
+    ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); } });
+    send.addEventListener('click', doSend);
+    comp.append(ta, send); box.appendChild(comp);
+    log.scrollTop = log.scrollHeight;
   }
 
   // --- chat transcript (your inbound sends; delivery is file-based, this is display)
@@ -1019,9 +1184,26 @@ const PAGE = `<!doctype html>
     // "live" means a watcher is heartbeating RIGHT NOW (link === 'live'). Activity's
     // 'idle' can't be trusted — an idle session emits no events, so a long-dead one
     // still reads 'idle'; only the watcher beat (which stops when the session dies)
-    // reliably means a session is actually running.
+    // reliably means a session is actually running. When live the button stays enabled
+    // and clicking it FOCUSES the session terminal instead of launching a new one.
     sb.classList.toggle('live', sessionLive);
-    if (!sb.dataset.busy) { sb.textContent = sessionLive ? '● Session live' : '▶ Launch session'; sb.disabled = sessionLive; }
+    if (!sb.dataset.busy) {
+      sb.textContent = sessionLive ? '● Session live' : '▶ Launch session';
+      sb.disabled = false;
+      sb.title = sessionLive ? 'Bring this session terminal to the front' : 'Start this project session in a new terminal';
+    }
+  }
+  // Bring the running session's terminal window to the front (best-effort; Windows only).
+  async function focusSession() {
+    const sb = $('#sessbtn');
+    try {
+      const r = await api('/api/session/focus', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      if (r && r.focused === false) {
+        sb.dataset.busy = '1';
+        sb.textContent = r.reason ? r.reason : 'terminal not found';
+        setTimeout(() => { delete sb.dataset.busy; updateSessionBtn(); }, 2500);
+      }
+    } catch (e) { alert(e.message); }
   }
   async function launchSession() {
     const sb = $('#sessbtn');
@@ -1038,21 +1220,46 @@ const PAGE = `<!doctype html>
   // opens the app if it's already up, otherwise POSTs a launch (the server spawns the
   // configured dev command), waits for the URL to come alive, then opens it.
   async function loadApp() {
-    const btn = $('#appbtn'); if (!btn) return;
+    const btn = $('#appbtn'), rb = $('#apprestart'); if (!btn) return;
     let st; try { st = await api('/api/app'); } catch { st = null; }
     if (st && st.configured) {
       btn.style.display = 'inline-block';
+      if (rb) { rb.style.display = 'inline-block'; rb.dataset.url = st.url || ''; }
       if (!btn.dataset.busy) btn.textContent = st.running ? 'Open app ↗' : '▶ Open app';
       btn.dataset.url = st.url || '';
     } else {
       btn.style.display = 'none';
+      if (rb) rb.style.display = 'none';
     }
   }
+  // Force-stop the app server and start it fresh (for a wedged dev server), then reopen it.
+  async function restartApp() {
+    const rb = $('#apprestart');
+    rb.disabled = true; rb.textContent = 'restarting…';
+    let r; try { r = await api('/api/app/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }
+    catch (e) { alert(e.message); rb.disabled = false; rb.textContent = '↻ Restart app'; return; }
+    const url = (r && r.url) || rb.dataset.url || '';
+    const deadline = Date.now() + 25000;
+    (async function poll() {
+      let s; try { s = await api('/api/app'); } catch {}
+      if ((s && s.running) || Date.now() > deadline) {
+        if (url) openApp(url);
+        rb.disabled = false; rb.textContent = '↻ Restart app';
+        return;
+      }
+      setTimeout(poll, 1000);
+    })();
+  }
+  // Open the app in a NAMED tab (one per project), so repeat clicks reuse and focus the
+  // existing tab instead of piling up new ones. window.open with the same name navigates
+  // that tab; '_blank' would always make a new one.
+  const appWindowName = 'shells-app-' + (BASE ? BASE.split('/').pop() : 'app');
+  function openApp(url) { const w = window.open(url, appWindowName); if (w) { try { w.focus(); } catch {} } }
   async function launchApp() {
     const btn = $('#appbtn');
     btn.disabled = true; btn.dataset.busy = '1';
     let st; try { st = await api('/api/app'); } catch { st = null; }
-    if (st && st.running && st.url) { window.open(st.url, '_blank'); btn.disabled = false; delete btn.dataset.busy; btn.textContent = 'Open app ↗'; return; }
+    if (st && st.running && st.url) { openApp(st.url); btn.disabled = false; delete btn.dataset.busy; btn.textContent = 'Open app ↗'; return; }
     let r; try { r = await api('/api/app/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }
     catch (e) { alert(e.message); btn.disabled = false; delete btn.dataset.busy; return; }
     const url = r.url;
@@ -1062,7 +1269,7 @@ const PAGE = `<!doctype html>
     (async function poll() {
       let s; try { s = await api('/api/app'); } catch {}
       if ((s && s.running) || Date.now() > deadline) {   // open once alive, or give up waiting and open anyway (the tab will retry)
-        window.open(url, '_blank');
+        openApp(url);
         btn.textContent = 'Open app ↗'; btn.disabled = false; delete btn.dataset.busy;
         return;
       }
@@ -1075,7 +1282,8 @@ const PAGE = `<!doctype html>
     t.addEventListener('click', () => {
       if (activeKind === t.dataset.kind) return;
       activeKind = t.dataset.kind; syncTabs();
-      lastMsgSig = ''; loadMessages(true);          // explicit switch renders now
+      if (activeKind === 'issues') { currentIssue = null; lastIssuesSig = ''; loadIssues(true); }
+      else { lastMsgSig = ''; loadMessages(true); }   // explicit switch renders now
     });
   });
   $('#toggle-closed').onclick = () => {
@@ -1103,14 +1311,17 @@ const PAGE = `<!doctype html>
   });
 
   $('#appbtn').addEventListener('click', launchApp);
-  $('#sessbtn').addEventListener('click', launchSession);
+  $('#apprestart').addEventListener('click', restartApp);
+  $('#sessbtn').addEventListener('click', () => { if (sessionLive) focusSession(); else launchSession(); });
 
   syncTabs();
   loadNav();
   loadApp();
   loadMessages(true).then(loadChat); loadStatus();   // messages first so chat chips resolve on first paint
+  loadIssues(true);
   setInterval(loadApp, 4000);   // keep the button label (running vs launch) fresh
   setInterval(() => loadMessages(false), 2000);
+  setInterval(() => loadIssues(false), 2500);   // keep the Issues badge + list/detail fresh
   setInterval(loadChat, 2500);
   setInterval(loadStatus, 3000);
 })();
@@ -1155,11 +1366,13 @@ const HUB_PAGE = `<!doctype html>
   .empty { grid-column: 1/-1; padding: 40px; text-align: center; color: var(--muted); }
   .card { display: block; text-decoration: none; color: inherit; background: var(--panel);
     border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
-    padding: 15px 16px; transition: border-color .12s ease, transform .12s ease; }
+    padding: 15px 16px; overflow: hidden; transition: border-color .12s ease, transform .12s ease; }
   .card:hover { border-color: var(--accent); transform: translateY(-2px); }
   .chead { display: flex; align-items: center; gap: 10px; }
-  .chead .name { font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chead .act { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .chead .name { flex: 1; min-width: 0; font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* activity/status on its OWN line so a long task wraps inside the card rather than
+     bleeding out (the header keeps only the name + a state dot at the right). */
+  .cstatus { margin-top: 8px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
   .dot.working { background: conic-gradient(from 0deg, var(--ok), rgba(47,133,90,.12)); animation: hbwork .8s linear infinite; }
@@ -1196,11 +1409,9 @@ const HUB_PAGE = `<!doctype html>
       const head = el('div', 'chead');
       head.appendChild(el('span', 'name', p.name));
       const [cls, label] = ACT[p.activity] || ACT.unknown;
-      const act = el('span', 'act');
-      act.appendChild(el('span', 'dot ' + cls + (p.activity === 'working' ? ' working' : '')));
-      act.appendChild(el('span', null, p.task ? ('working · ' + p.task) : label));
-      head.appendChild(act);
+      head.appendChild(el('span', 'dot ' + cls + (p.activity === 'working' ? ' working' : '')));   // state dot at the right
       card.appendChild(head);
+      card.appendChild(el('div', 'cstatus', p.task ? ('working · ' + p.task) : label));   // wraps within the card
       const counts = el('div', 'counts');
       KMETA.forEach(([k, ic]) => {
         const c = el('span', 'c' + (k === 'decision' && p.counts.decision > 0 ? ' hot' : ''));
