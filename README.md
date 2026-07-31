@@ -90,6 +90,7 @@ store/
   cli.js                  agent-side CLI over the store (stdin JSON, never shell args)
 reference/
   server.js               TIER 4 — the included one-file web UI (ships by default)
+  overlay.js              TIER 4 — embeddable widget: one <script> tag drops shells into any local app
 doctor.js                 TIER 1 — fires every hook, asserts the effect, checks the watcher
 ```
 
@@ -114,6 +115,41 @@ doctor.js                 TIER 1 — fires every hook, asserts the effect, check
    also a complete, single-file worked example of `protocol.md` (safe escaping, not
    clobbering unsaved input, honest staleness), so you can read that file alone and
    replace the UI with your own front end (`--no-ui`) in any stack.
+   `reference/overlay.js` is a second front end over the same API — an embeddable
+   widget you drop into your own app with one `<script>` tag (see [Embed the
+   overlay](#embed-the-overlay-in-your-own-app)).
+
+## Embed the overlay in your own app
+
+The full-page UI is not the only way in. `reference/overlay.js` is a compact,
+self-contained widget you can drop into a web app you're building — while you work
+on the app, shells rides along in the corner. With the server running, add one line
+to your app's HTML:
+
+```html
+<script src="http://127.0.0.1:4420/overlay.js"></script>
+```
+
+That injects a shell button at the bottom-right. It starts closed; clicking it opens
+a speed-dial — option bubbles animate up (Chat, Decisions, Tasks, Knowledge,
+Notifications), and clicking one opens that section as a centered modal. Everything
+is driven by the **same JSON API** the full UI uses, so it already has your project's
+context in it. The widget lives entirely inside a shadow root (its CSS and your app's
+CSS can't touch each other), infers which shells server to talk to from where the
+script was served, and needs no build step.
+
+Cross-origin calls just work from any **loopback** origin (`localhost` / `127.0.0.1`,
+any port) — the server reflects those and refuses everything else, which also blocks
+DNS-rebinding. To embed from a non-loopback origin (a deployed page hitting your
+machine), opt in explicitly:
+
+```bash
+SHELLS_CORS_ORIGINS="https://my.site" node reference/server.js
+```
+
+The overlay is served from disk per request, so editing `overlay.js` shows up on the
+next page load with no restart. It's also a second worked example of `protocol.md` —
+a different front end over the identical API.
 
 ## Adding shells to a project
 

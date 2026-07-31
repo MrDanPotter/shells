@@ -14,6 +14,8 @@
 //   echo '<json>' | node shells.js store new task          {title, body?, project?, issue_ref?}
 //   echo '<json>' | node shells.js store new knowledge     {title, body, project?, issue_ref?}
 //   echo '<json>' | node shells.js store new notification  {title, body?, project?}
+//   echo '<json>' | node shells.js store say               {text, links?} — a chat-stream reply, links = message ids
+//   echo '<json>' | node shells.js store extern            {text, links?, source?} — a chat message from an EXTERNAL agent system
 //   node shells.js store list [kind] [--all]                open messages as JSON
 //   node shells.js store get <id>
 //   node shells.js store resolve <id>                       agent closes an answered/done message
@@ -27,6 +29,7 @@
 
 const fs = require('fs');
 const store = require('./store');
+const chat = require('./chat');
 
 function die(msg) { console.error(msg); process.exit(1); }
 
@@ -45,6 +48,23 @@ function run(argv) {
       const input = readStdinJson();
       const id = store.create({ ...input, kind: arg });
       console.log(id);
+      process.exit(0);
+    }
+
+    // Post a short reply into the chat stream (NOT a queued message). `links` are
+    // ids of store messages you just created; the front end makes them click-to-open.
+    if (cmd === 'say') {
+      const input = readStdinJson();
+      const rec = chat.say(input);
+      console.log(rec.id);
+      process.exit(0);
+    }
+
+    // A chat message from an agent system OUTSIDE this bidirectional loop.
+    if (cmd === 'extern') {
+      const input = readStdinJson();
+      const rec = chat.external(input);
+      console.log(rec.id);
       process.exit(0);
     }
 
@@ -96,6 +116,8 @@ function run(argv) {
   echo '<json>' | node shells.js store new task          {title, body?, project?, issue_ref?}
   echo '<json>' | node shells.js store new knowledge     {title, body, project?, issue_ref?}
   echo '<json>' | node shells.js store new notification  {title, body?, project?}
+  echo '<json>' | node shells.js store say               {text, links?}
+  echo '<json>' | node shells.js store extern            {text, links?, source?}
   node shells.js store list [kind] [--all]
   node shells.js store get <id>
   echo '<json>' | node shells.js store respond <id>      {verdict, response?}

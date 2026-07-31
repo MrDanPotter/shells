@@ -37,11 +37,12 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const store = require('../store/store');
-const { inboxDir, chatLogFile, ROOT } = require('../kernel/lib/paths');
+const { inboxDir, chatLogFile, stateDir, ROOT } = require('../kernel/lib/paths');
 const { computeStatus, readActivity } = require('../kernel/lib/activity');
 const { watcherStatus } = require('../kernel/lib/watcher-status');
 const { atomicWrite, readJson } = require('../kernel/lib/atomic');
 const { seed } = require('../store/seed');
+const chat = require('../store/chat');
 
 // Hardcoded default is 4420 — shells' assigned port in this workspace's port
 // registry. Must never collide with another app's default; PORT is how a Fleet
@@ -49,6 +50,43 @@ const { seed } = require('../store/seed');
 const PORT = process.env.PORT || 4420;
 const HOST = process.env.HOST || '127.0.0.1';
 const ID_RE = /^[A-Za-z0-9._-]+$/;
+
+// --- CORS for embedded front ends (e.g. the overlay widget) -----------------
+// The overlay runs on YOUR app's origin and calls this server cross-origin, so
+// the browser needs a CORS grant. We reflect the request Origin — but ONLY
+// loopback origins by default (localhost / 127.0.0.1, any port), which is exactly
+// the set a single-dev local setup needs and, not incidentally, defeats DNS
+// rebinding: a public page pointed at 127.0.0.1 carries its OWN public Origin,
+// which we refuse to echo. To embed from a non-loopback origin (a deployed page
+// hitting your machine), opt in explicitly:
+//   SHELLS_CORS_ORIGINS="https://my.site,https://other.site" node reference/server.js
+const EXTRA_ORIGINS = new Set((process.env.SHELLS_CORS_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean));
+const LOOPBACK_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+
+function corsOrigin(origin) {
+  if (!origin) return null;
+  if (LOOPBACK_ORIGIN.test(origin) || EXTRA_ORIGINS.has(origin)) return origin;
+  return null;
+}
+
+// Set CORS headers via setHeader so they survive the later writeHead in send()
+// (writeHead merges with previously-set headers, only overriding same-named ones,
+// and send() sets only Content-Type). Returns true if this was a preflight it
+// fully answered — the caller then returns without routing further.
+function applyCors(req, res) {
+  const allow = corsOrigin(req.headers.origin);
+  if (allow) {
+    res.setHeader('Access-Control-Allow-Origin', allow);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // Chrome's Private Network Access preflight for a public page -> local server.
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  }
+  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return true; }
+  return false;
+}
 
 // --- staleness signal #2: is THIS process running the code on disk? -------
 // Two different things can be stale, and only one is fixed by a page reload:
@@ -68,33 +106,59 @@ function send(res, code, body, type = 'application/json') {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', c => { data += c; if (data.length > 1e6) req.destroy(); });
+    req.on('data', c => { data += c; if (data.length > 25 * 1024 * 1024) req.destroy(); });
     req.on('end', () => resolve(data));
     req.on('error', reject);
   });
 }
 
-// --- chat log (inbox history, for display only — delivery is file-based) ---
-function appendChatLog(rec) {
-  const log = readJson(chatLogFile(), []);
-  log.push(rec);
-  atomicWrite(chatLogFile(), JSON.stringify(log.slice(-200), null, 2) + '\n');
-}
-
+// A user turn: drop a file in the inbox dir (that's what actually gets DELIVERED to
+// the session) AND append it to the shared chat transcript (role 'user') for display.
+// Agent turns go into the same transcript via `store say` (role 'agent') — see
+// store/chat.js — which is what makes the chat stream bidirectional.
 function queueInbox(text) {
-  const rec = { id: `i-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, text, sent_at: new Date().toISOString() };
+  const rec = { id: chat.rid('i'), role: 'user', text, sent_at: new Date().toISOString() };
   fs.mkdirSync(inboxDir(), { recursive: true });
   // Filename ordering IS delivery ordering — keep it lexicographically sortable.
   atomicWrite(path.join(inboxDir(), `${rec.sent_at.replace(/[:.]/g, '-')}-${rec.id}.json`),
     JSON.stringify(rec, null, 2) + '\n');
-  appendChatLog(rec);
+  chat.appendChat(rec);
   return rec;
+}
+
+// A context capture from the overlay's Inspect tool: an optional cropped PNG plus the
+// element's DOM serialization. The image is written to state/context/<id>.png; the
+// agent-facing DELIVERY (dropInbox) carries the DOM text + the file's absolute path so
+// the agent can Read the picture; the chat DISPLAY gets a short bubble + a thumbnail URL.
+function contextDir() { return path.join(stateDir(), 'context'); }
+function saveContext({ text, note, image, selector } = {}) {
+  const dom = String(text || '').trim();
+  const noteStr = String(note || '').trim();
+  let imgRel = null, absPath = null;
+  if (typeof image === 'string' && image.startsWith('data:image/png;base64,')) {
+    const id = chat.rid('ctx');
+    fs.mkdirSync(contextDir(), { recursive: true });
+    absPath = path.join(contextDir(), id + '.png');
+    fs.writeFileSync(absPath, Buffer.from(image.slice('data:image/png;base64,'.length), 'base64'));
+    imgRel = '/api/context/' + id + '.png';
+  }
+  // delivery to the agent (inbox) — full context + the path to Read
+  const delivery = [noteStr, dom, absPath ? '[screenshot attached — Read this file to see it: ' + absPath + ']' : '']
+    .filter(Boolean).join('\n\n');
+  chat.dropInbox(delivery);
+  // display in chat — a short bubble + the thumbnail
+  const disp = { id: chat.rid('c'), role: 'user', text: noteStr || ('🎯 shared element ' + (selector || '')), links: [], sent_at: new Date().toISOString() };
+  if (imgRel) disp.image = imgRel;
+  chat.appendChat(disp);
+  return { ok: true, image: imgRel };
 }
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const p = url.pathname;
   try {
+    if (applyCors(req, res)) return;   // answered a CORS preflight — nothing more to do
+
     // --- messages -----------------------------------------------------------
 
     if (req.method === 'GET' && p === '/api/messages') {
@@ -128,7 +192,7 @@ const server = http.createServer(async (req, res) => {
     // --- inbox (inbound, chat-style) -----------------------------------------
 
     if (req.method === 'GET' && p === '/api/inbox') {
-      return send(res, 200, readJson(chatLogFile(), []).slice(-50));
+      return send(res, 200, chat.readChat(50));
     }
 
     if (req.method === 'POST' && p === '/api/inbox') {
@@ -150,6 +214,39 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/api/version') {
       return send(res, 200, { server_stale: fileSig(__filename) !== SERVER_SIG_AT_START });
+    }
+
+    // --- the embeddable overlay widget ---------------------------------------
+    // Served from disk per request (not baked into this process) so editing
+    // overlay.js shows up on the next page load with no restart. Drop one line
+    // into any local app to embed it:
+    //   <script src="http://127.0.0.1:4420/overlay.js"></script>
+    if (req.method === 'GET' && p === '/overlay.js') {
+      let js;
+      try { js = fs.readFileSync(path.join(__dirname, 'overlay.js'), 'utf8'); }
+      catch { return send(res, 404, { error: 'overlay.js not found' }); }
+      return send(res, 200, js, 'application/javascript');
+    }
+
+    // html2canvas, vendored and lazy-loaded by the overlay's Inspect screenshot.
+    if (req.method === 'GET' && p === '/html2canvas.js') {
+      let js;
+      try { js = fs.readFileSync(path.join(__dirname, 'vendor', 'html2canvas.min.js'), 'utf8'); }
+      catch { return send(res, 404, { error: 'html2canvas not vendored' }); }
+      return send(res, 200, js, 'application/javascript');
+    }
+
+    // Inspect context capture: save the cropped PNG + deliver the DOM context.
+    if (req.method === 'POST' && p === '/api/context') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      return send(res, 200, saveContext(body));
+    }
+    // Serve a saved context image (for the chat thumbnail). Filename is id-shaped only.
+    if (req.method === 'GET' && /^\/api\/context\/[A-Za-z0-9._-]+\.png$/.test(p)) {
+      const abs = path.join(contextDir(), p.split('/').pop());
+      let buf; try { buf = fs.readFileSync(abs); } catch { return send(res, 404, { error: 'not found' }); }
+      res.writeHead(200, { 'Content-Type': 'image/png' });
+      return res.end(buf);
     }
 
     // --- the page -------------------------------------------------------------
@@ -210,6 +307,8 @@ const PAGE = `<!doctype html>
   }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .dot.working { background: conic-gradient(from 0deg, var(--ok), rgba(47,133,90,.12)); animation: pgwork .8s linear infinite; }
+  @keyframes pgwork { to { transform: rotate(360deg); } }
   .banner {
     margin: 0; padding: 10px 20px; background: var(--bad); color: #fff;
     font-size: 13.5px; display: none;
@@ -227,7 +326,26 @@ const PAGE = `<!doctype html>
   .chat { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; min-height: 120px; max-height: 40vh; overflow-y: auto; }
   .bubble { max-width: 85%; padding: 8px 12px; border-radius: 12px; font-size: 13.5px; white-space: pre-wrap; }
   .bubble.you { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-bottom-right-radius: 3px; }
+  .bubble.agent { align-self: flex-start; background: var(--bg); color: var(--ink); border: 1px solid var(--line); border-bottom-left-radius: 3px; }
+  .bubble.external { align-self: flex-start; background: #e05a52; color: #fff; border-bottom-left-radius: 3px; }
+  .bubble.external .src { display: block; font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; opacity: .85; margin-bottom: 3px; }
   .bubble .when { display: block; font-size: 10.5px; opacity: .7; margin-top: 3px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+  .chip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; max-width: 100%; }
+  .chip:hover { border-color: var(--accent); }
+  .chip.done { opacity: .45; }   /* linked item already acknowledged (read/done/closed) */
+  .chip .cdot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .chip .clabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip.k-decision .cdot { background: var(--decision); } .chip.k-task .cdot { background: var(--task); }
+  .chip.k-knowledge .cdot { background: var(--knowledge); } .chip.k-notification .cdot { background: var(--notification); }
+  @keyframes flash { from { background: rgba(59,110,245,.18); } to { background: transparent; } }
+  .msg.flash { animation: flash 1.6s ease; }
+  .bubble.typing { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; padding: 11px 13px; }
+  .bubble.typing .d { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); animation: pgtype 1.2s infinite ease-in-out; }
+  .bubble.typing .d:nth-child(2) { animation-delay: .18s; }
+  .bubble.typing .d:nth-child(3) { animation-delay: .36s; }
+  @keyframes pgtype { 0%, 60%, 100% { transform: translateY(0); opacity: .4; } 30% { transform: translateY(-4px); opacity: .9; } }
   .sendbar { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--line); }
   .sendbar input {
     font: inherit; flex: 1; padding: 9px 12px; border-radius: 10px;
@@ -328,6 +446,10 @@ const PAGE = `<!doctype html>
   const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   const KINDS = ['decision', 'task', 'knowledge', 'notification'];
   const PLURAL = { decision: 'decisions', task: 'tasks', knowledge: 'knowledge messages', notification: 'notifications' };
+  const KLABEL = { decision: 'Decision', task: 'Task', knowledge: 'Knowledge', notification: 'Notification' };
+  let allMessages = [];          // last /api/messages snapshot — lets the chat resolve link ids
+  let pendingFlash = null;       // a message id to scroll to + flash on the next render
+  let activityState = '';        // reported_state — drives the working spinner + typing dots
 
   // --- bruise: never reflow a list under the pointer, never clobber unsaved input.
   // A poll that lands mid-interaction is held; a catch-up render is scheduled for
@@ -370,6 +492,7 @@ const PAGE = `<!doctype html>
 
   function messageNode(m) {
     const wrap = el('div', 'msg k-' + m.kind + (m.status === 'closed' ? ' closed' : ''));
+    wrap.dataset.id = m.id;
     const top = el('div', 'msg-top');
     top.appendChild(el('span', 'title', m.title));
     top.appendChild(el('span', 'status', m.status));
@@ -423,7 +546,18 @@ const PAGE = `<!doctype html>
 
   function openCount(list, kind) { return list.filter(m => m.kind === kind && m.status !== 'closed').length; }
 
+  function applyFlash() {
+    if (!pendingFlash) return;
+    const sel = (window.CSS && CSS.escape) ? CSS.escape(pendingFlash) : pendingFlash;
+    const node = document.querySelector('#messages .msg[data-id="' + sel + '"]');
+    if (!node) return;
+    node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    node.classList.remove('flash'); void node.offsetWidth; node.classList.add('flash');
+    pendingFlash = null;
+  }
+
   function renderMessages(list) {
+    allMessages = list;
     // Tab badges reflect OPEN counts per kind — update every poll (cheap, guarded).
     KINDS.forEach(k => {
       const badge = document.querySelector('.tab[data-kind="' + k + '"] .badge');
@@ -441,7 +575,7 @@ const PAGE = `<!doctype html>
 
     const shown = list.filter(m => m.kind === activeKind && (showClosed || m.status !== 'closed'));
     const sig = activeKind + '|' + showClosed + '|' + JSON.stringify(shown.map(m => [m.id, m.status, m.updated_at, m.response]));
-    if (sig === lastMsgSig) return;                 // nothing visibly changed; leave the DOM alone
+    if (sig === lastMsgSig) { applyFlash(); return; }   // content unchanged, but a flash may be pending
     lastMsgSig = sig;
     const box = $('#messages');
     box.textContent = '';
@@ -450,6 +584,21 @@ const PAGE = `<!doctype html>
     } else {
       shown.forEach(m => box.appendChild(messageNode(m)));
     }
+    applyFlash();
+  }
+
+  // Jump to a linked message from a chat chip: reveal it (opening 'closed' view if
+  // needed), switch to its tab, and flash it. Resolves against the last snapshot.
+  function openMessage(id) {
+    const m = allMessages.find(x => x.id === id);
+    if (!m) return;
+    if (m.status === 'closed' && !showClosed) {
+      showClosed = true;
+      $('#toggle-closed').textContent = 'hide closed';
+    }
+    pendingFlash = id;
+    if (activeKind !== m.kind) { activeKind = m.kind; syncTabs(); }
+    lastMsgSig = ''; loadMessages(true);
   }
 
   function syncTabs() {
@@ -470,19 +619,55 @@ const PAGE = `<!doctype html>
   let lastChatSig = '';
   async function loadChat() {
     let log; try { log = await api('/api/inbox'); } catch { return; }
-    const sig = JSON.stringify(log.map(r => r.id));
+    const sig = JSON.stringify(log.map(r => [r.id, r.role || 'user', (r.links || []).map(id => { const m = allMessages.find(x => x.id === id); return id + ':' + (m ? m.status : '?'); }).join('|')]));
     if (sig === lastChatSig) return;
     lastChatSig = sig;
     const box = $('#chat'); const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
     box.textContent = '';
-    if (!log.length) { box.appendChild(el('div', 'empty', 'No messages sent yet.')); return; }
+    if (!log.length) { box.appendChild(el('div', 'empty', 'No messages yet.')); return; }
     log.forEach(r => {
-      const b = el('div', 'bubble you'); b.appendChild(document.createTextNode(r.text));
+      const roleCls = r.role === 'agent' ? 'agent' : r.role === 'external-agent' ? 'external' : 'you';
+      const b = el('div', 'bubble ' + roleCls);
+      if (r.role === 'external-agent') b.appendChild(el('span', 'src', r.source ? ('external · ' + r.source) : 'external agent'));
+      b.appendChild(document.createTextNode(r.text));
       const t = new Date(r.sent_at);
       b.appendChild(el('span', 'when', isNaN(t) ? '' : t.toLocaleTimeString()));
+      if (r.links && r.links.length) b.appendChild(chipRow(r.links));
       box.appendChild(b);
     });
+    updateTyping();
     if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  // Typing indicator: an animated-dots bubble at the bottom of #chat whenever the
+  // session is actively working. Toggled on chat re-render and on each status poll.
+  function updateTyping() {
+    const box = $('#chat');
+    const has = box.querySelector('.typing');
+    const working = activityState === 'working';
+    if (working && !has) {
+      const t = el('div', 'bubble agent typing');
+      t.append(el('span', 'd'), el('span', 'd'), el('span', 'd'));
+      box.appendChild(t); box.scrollTop = box.scrollHeight;
+    } else if (!working && has) { has.remove(); }
+  }
+
+  // Render an agent reply's links as click-to-open chips, resolved (kind + title)
+  // against the last messages snapshot. An unresolved id still renders a clickable
+  // chip — by click time the snapshot has almost always caught up.
+  function chipRow(ids) {
+    const row = el('div', 'chips');
+    ids.forEach(id => {
+      const m = allMessages.find(x => x.id === id);
+      const chip = el('div', 'chip' + (m ? ' k-' + m.kind : '') + (m && m.status !== 'open' ? ' done' : ''));
+      chip.appendChild(el('span', 'cdot'));
+      const label = m ? (KLABEL[m.kind] + ': ' + m.title) : 'open item';
+      chip.appendChild(el('span', 'clabel', label));
+      chip.title = label;
+      chip.onclick = () => openMessage(id);
+      row.appendChild(chip);
+    });
+    return row;
   }
 
   // --- honest status: activity + watcher link + stale server ------------------
@@ -497,8 +682,10 @@ const PAGE = `<!doctype html>
       const map = { working: ['ok', 'working'], idle: ['warn', 'idle'], compacting: ['ok', 'compacting'],
                     stale: ['bad', 'no signal'], ended: ['bad', 'session ended'] };
       const [cls, label] = map[a.reported_state] || ['warn', a.reported_state || 'unknown'];
-      $('#dot-activity').className = 'dot ' + cls;
+      activityState = a.reported_state || '';
+      $('#dot-activity').className = 'dot ' + cls + (activityState === 'working' ? ' working' : '');
       $('#txt-activity').textContent = a.reported_state === 'working' && a.task ? 'working · ' + a.task : label;
+      updateTyping();
     } catch {}
     try {
       const w = await api('/api/watcher');
@@ -540,7 +727,7 @@ const PAGE = `<!doctype html>
   });
 
   syncTabs();
-  loadMessages(true); loadChat(); loadStatus();
+  loadMessages(true).then(loadChat); loadStatus();   // messages first so chat chips resolve on first paint
   setInterval(() => loadMessages(false), 2000);
   setInterval(loadChat, 2500);
   setInterval(loadStatus, 3000);

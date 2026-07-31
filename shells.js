@@ -87,7 +87,13 @@ switch (area) {
         + 'Run your own front end and launch `claude` yourself.');
     }
     const port = process.env.PORT || 4420;
-    const srv = spawn(process.execPath, [server], { stdio: 'ignore' });
+    // --watch: `dev` is the interactive build loop, and the whole web UI is one
+    // template string baked into server.js at load — so without this, every edit
+    // to the page needs a manual process restart before it shows up. Node's
+    // built-in file watcher (stable since 20; no dependency) restarts the server
+    // on save, reducing "see my change" to a browser refresh. Kept to `dev` only,
+    // which is explicitly the edit-the-shell loop.
+    const srv = spawn(process.execPath, ['--watch', server], { stdio: 'ignore' });
     srv.on('error', e => process.stderr.write(`shells dev: UI failed to start: ${e.message}\n`));
     const stop = () => { try { srv.kill(); } catch { /* already gone */ } };
     process.on('SIGINT', stop);

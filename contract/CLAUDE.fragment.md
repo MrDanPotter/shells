@@ -83,6 +83,28 @@ you have already broken the rule; that material belongs in the message body.
 A good test: if the person only ever looks at the message queue and never reads
 this stream, do they have everything they need? If not, the turn isn't finished.
 
+## Reply in the chat stream, with links (`store say`)
+
+The front end has a chat stream, and it is **two-way**. The human types into it; you
+reply into it with `store say`. This is NOT the terminal stream from the section
+above — it is part of the front end, and it **is** read. So end your turn by posting
+a short reply there: one or two lines of what you did, plus `links` — the ids of the
+store messages you created this turn. The front end renders each link as a
+click-to-open jump to that item.
+
+```bash
+echo '{"text":"Raised the cache-format decision and a follow-up task.","links":["m-ab12cd","m-ef34gh"]}' \
+  | node shells.js store say
+```
+
+Division of labour: the substance still goes in the **store messages** — that is
+where a decision gets answered, a task tracked, knowledge re-read. The `say` reply is
+the thin conversational thread that *points at* them. It is the same "pointer, never
+the content" rule as above, except the pointer now lives in the live chat stream as a
+real link instead of dying in terminal scrollback. `say` is chat-only: it has no
+open/close lifecycle and cannot be replied to, so anything that needs a reply is
+still a **decision**, never just a `say`.
+
 ## Direct questions are not an exemption
 
 If someone asks you something directly in chat, you still answer it as a message
@@ -110,6 +132,9 @@ echo '{"title":"…","chosen":"…","options":["…","…"],"rationale":"…","b
 echo '{"title":"…","body":"…"}' | node shells.js store new task
 echo '{"title":"…","body":"…"}' | node shells.js store new knowledge
 echo '{"title":"…","body":"…"}' | node shells.js store new notification
+
+# a short reply into the two-way chat stream, linking the artifacts you just made:
+echo '{"text":"…","links":["<id>","<id>"]}' | node shells.js store say
 
 node shells.js store list [decision|task|knowledge|notification] [--all]
 node shells.js store resolve <id>     # once you've applied a reply on an answered/done message
