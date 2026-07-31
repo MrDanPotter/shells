@@ -35,7 +35,7 @@
     "doctor": "node doctor.js",
     "reference": "node reference/server.js",
     "scaffold": "node bin/create-shells.js",
-    "test": "node doctor.js && node test/scaffold.test.js",
+    "test": "node doctor.js && node test/scaffold.test.js && node test/hub.test.js && node test/server-routing.test.js",
     "prepublishOnly": "npm test"
   },
   "dependencies": {},

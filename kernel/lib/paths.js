@@ -8,12 +8,19 @@
 // Cross-platform: path.join + os.tmpdir only, no hardcoded separators.
 
 const path = require('path');
+const { currentStateDir } = require('./context');
 
 // kernel/lib -> kernel -> repo root
 const ROOT = path.resolve(__dirname, '..', '..');
 
+// Resolution order, most specific first:
+//   1. a per-request state dir set by the shared hub (context.js AsyncLocalStorage) —
+//      this is what lets ONE process serve MANY projects, one per request;
+//   2. SHELLS_STATE_DIR — the process-wide override doctor.js and tests use;
+//   3. the built-in default alongside the kit.
+// Single-process callers never set (1), so their behaviour is unchanged.
 function stateDir() {
-  return process.env.SHELLS_STATE_DIR || path.join(ROOT, 'state');
+  return currentStateDir() || process.env.SHELLS_STATE_DIR || path.join(ROOT, 'state');
 }
 
 module.exports = {

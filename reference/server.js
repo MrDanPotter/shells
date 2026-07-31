@@ -44,6 +44,8 @@ const { atomicWrite, readJson } = require('../kernel/lib/atomic');
 const { seed } = require('../store/seed');
 const chat = require('../store/chat');
 const issues = require('../store/issues');
+const registry = require('../lib/registry');
+const { runWithStateDir } = require('../kernel/lib/context');
 
 // Hardcoded default is 4420 — shells' assigned port in this workspace's port
 // registry. Must never collide with another app's default; PORT is how a Fleet
@@ -213,11 +215,13 @@ function saveContext({ text, note, image, selector, createIssue, issue } = {}) {
   return { ok: true, image: imgRel };
 }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-  const p = url.pathname;
-  try {
-    if (applyCors(req, res)) return;   // answered a CORS preflight — nothing more to do
+// The route table. It reads and writes through the store/chat/issues modules, which
+// resolve WHERE state lives via the ambient state dir (kernel/lib/context.js): in
+// single-project mode that's the env/default; under the hub's /p/<key>/ prefix the
+// front door below has already pinned it to that project for this request. `p` is the
+// effective pathname (any /p/<key> prefix already stripped); `url` is the original,
+// used only for query params, which the prefix never touches.
+async function handle(req, res, p, url) {
 
     // --- messages -----------------------------------------------------------
 
@@ -343,6 +347,26 @@ const server = http.createServer(async (req, res) => {
     }
 
     send(res, 404, { error: 'not found' });
+}
+
+// The multiplexed front door — one process, many projects:
+//   /p/<key>/...  -> pin the request to THAT project's state dir (the shared hub);
+//   anything else -> the default state dir (single-project mode, exactly as before).
+// The key is a registry slug ([a-z0-9-], no separators), so this can't be coaxed into
+// path traversal, and an unregistered key is refused. CORS runs first so it still
+// answers preflights regardless of routing, and the one try/catch lives here so a
+// readBody 413 that already responded is never overwritten by a 500.
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, 'http://localhost');
+  try {
+    if (applyCors(req, res)) return;   // answered a CORS preflight — nothing more to do
+    const nm = url.pathname.match(/^\/p\/([a-z0-9-]+)(\/.*)?$/);
+    if (nm) {
+      const dir = registry.resolveStateDir(nm[1]);
+      if (!dir) return send(res, 404, { error: 'unknown project key: ' + nm[1] });
+      return await runWithStateDir(dir, () => handle(req, res, nm[2] || '/', url));
+    }
+    return await handle(req, res, url.pathname, url);
   } catch (e) {
     // readBody may have already answered (e.g. a 413 for an oversized body) before
     // rejecting — don't write a second response over headers that are already out.
@@ -557,8 +581,15 @@ const PAGE = `<!doctype html>
     return [...document.querySelectorAll('#messages input.revise')].some(i => i.value.trim() !== '');
   }
 
+  // Under the hub this page is served at /p/<key>/ and every API call must carry that
+  // prefix; served standalone at / it's empty. Derived from the path (no server-side
+  // templating) so the identical page works both ways. Every network call goes through
+  // api(), so prefixing here covers them all.
+  const BASE = location.pathname.startsWith('/p/')
+    ? '/' + location.pathname.split('/').slice(1, 3).join('/')
+    : '';
   async function api(path, opts) {
-    const r = await fetch(path, opts);
+    const r = await fetch(BASE + path, opts);
     let j = null; try { j = await r.json(); } catch {}
     if (!r.ok) throw new Error((j && j.error) || ('HTTP ' + r.status));
     return j;

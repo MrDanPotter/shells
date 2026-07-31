@@ -29,7 +29,15 @@
 
   // currentScript is only valid during this synchronous execution — capture now.
   const thisScript = document.currentScript;
-  const BASE = thisScript ? new URL(thisScript.src).origin : location.origin;
+  // The backing server is inferred from where THIS script was served. Under the shared
+  // hub it's served at /p/<key>/overlay.js, so BASE carries that project prefix and
+  // every api()/image URL below (all built as BASE + '/api/…') targets the right
+  // project automatically; served standalone at /overlay.js, BASE is just the origin.
+  const BASE = (() => {
+    const u = new URL(thisScript ? thisScript.src : location.href, location.href);
+    const m = u.pathname.match(/^\/p\/[a-z0-9-]+/);
+    return u.origin + (m ? m[0] : '');
+  })();
 
   const KINDS = ['decision', 'task', 'knowledge', 'notification'];
   // The speed-dial options, ordered nearest-the-FAB first (chat), outward to the top.
