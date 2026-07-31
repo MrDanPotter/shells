@@ -215,6 +215,49 @@ function saveContext({ text, note, image, selector, createIssue, issue } = {}) {
   return { ok: true, image: imgRel };
 }
 
+// Is a URL reachable right now? A plain GET probe with a short timeout — used to tell
+// whether a project's app dev server is already up (so we open it instead of launching
+// a second) and to report "running" without tracking any PID.
+function appReachable(u) {
+  return new Promise(resolve => {
+    let target; try { target = new URL(u); } catch { return resolve(false); }
+    const lib = target.protocol === 'https:' ? require('https') : require('http');
+    const req = lib.get({
+      host: target.hostname,
+      port: target.port || (target.protocol === 'https:' ? 443 : 80),
+      path: target.pathname || '/', timeout: 800
+    }, r => { r.resume(); resolve(true); });
+    req.on('error', () => resolve(false));
+    req.on('timeout', () => { req.destroy(); resolve(false); });
+  });
+}
+
+// Open a project's Claude session in a NEW terminal window running `cmd` in `cwd`. A
+// session is interactive, so unlike the headless app dev server it needs a real
+// console — which is OS-specific. SHELLS_TERMINAL_LAUNCHER overrides the whole thing
+// (an escape hatch for a preferred terminal, and the seam tests use to avoid opening a
+// window). Like the app launch, the command comes only from the registry, never the
+// request; and the child env is cleaned so it doesn't inherit the hub's PORT/state.
+function openTerminal(cmd, cwd, title) {
+  const { spawn } = require('child_process');
+  const env = { ...process.env };
+  for (const k of ['PORT', 'HOST', 'SHELLS_STATE_DIR', 'SHELLS_HOME']) delete env[k];
+  const opts = { cwd, detached: true, stdio: 'ignore', env };
+  const override = process.env.SHELLS_TERMINAL_LAUNCHER;
+  let child;
+  if (override) {
+    child = spawn(override, { ...opts, shell: true });
+  } else if (process.platform === 'win32') {
+    child = spawn(`start "${title}" cmd /k "${cmd}"`, { ...opts, shell: true });   // fresh console that stays open
+  } else if (process.platform === 'darwin') {
+    child = spawn('osascript', ['-e', `tell application "Terminal" to do script "cd ${cwd.replace(/"/g, '\\"')} && ${cmd}"`], opts);
+  } else {
+    child = spawn(process.env.SHELLS_TERMINAL || 'x-terminal-emulator', ['-e', `bash -lc 'cd "${cwd}" && ${cmd}; exec bash'`], opts);
+  }
+  child.on('error', () => { /* best-effort; the client is told it launched */ });
+  child.unref();
+}
+
 // --- the hub fleet view: aggregate every registered project's state -----------
 // The shared server already reads each project's state dir to serve /p/<key>/, so a
 // cross-project overview costs nothing extra: for each registered project, read its
@@ -251,7 +294,61 @@ function hubProjects() {
 // front door below has already pinned it to that project for this request. `p` is the
 // effective pathname (any /p/<key> prefix already stripped); `url` is the original,
 // used only for query params, which the prefix never touches.
-async function handle(req, res, p, url) {
+async function handle(req, res, p, url, key) {
+
+    // --- the app that belongs to this project (launch its dev server) --------
+    // Only under /p/<key>/ (needs a registered project). The launch command comes
+    // ONLY from the registry entry (set on the machine via `shells.js register
+    // --app-cmd`), NEVER from the request body — so a loopback page can at most start
+    // an already-configured dev command, not inject one. "running" is a plain reachability
+    // probe of the configured URL, so there's no PID bookkeeping to get wrong.
+    if (req.method === 'GET' && p === '/api/app') {
+      const e = key ? registry.get(key) : null;
+      const app = e && e.app ? e.app : null;
+      const running = app && app.url ? await appReachable(app.url) : false;
+      return send(res, 200, { configured: !!(app && app.cmd), cmd: (app && app.cmd) || '', url: (app && app.url) || '', running });
+    }
+    if (req.method === 'POST' && p === '/api/app/launch') {
+      const e = key ? registry.get(key) : null;
+      const app = e && e.app;
+      if (!app || !app.cmd) return send(res, 400, { error: 'no app command configured (set one with: shells.js register --app-cmd "…" --app-url "…")' });
+      const already = app.url ? await appReachable(app.url) : false;
+      if (!already) {
+        try {
+          // Launch with a CLEANED env. This server runs with PORT/HOST/SHELLS_STATE_DIR/
+          // SHELLS_HOME set for ITSELF; leaking them into the app makes it bind the hub's
+          // port (or read the hub's state) instead of its own — e.g. `PORT=4460` would
+          // send an app that defaults to :3000 straight into a collision with the hub.
+          // Strip them so the app runs exactly as it would if you ran its dev command.
+          const childEnv = { ...process.env };
+          for (const k of ['PORT', 'HOST', 'SHELLS_STATE_DIR', 'SHELLS_HOME']) delete childEnv[k];
+          // Tell the app where THIS hub's overlay for THIS project is, so its dev-only
+          // injection wires the overlay to /p/<key>/ on the hub — not a bare /overlay.js
+          // on whatever server happens to sit on the default port. An app should inject
+          // SHELLS_OVERLAY_URL when present; SHELLS_PORT/SHELLS_KEY are there for apps
+          // that build the URL themselves.
+          childEnv.SHELLS_OVERLAY_URL = `http://${HOST}:${PORT}/p/${key}/overlay.js`;
+          childEnv.SHELLS_PORT = String(PORT);
+          childEnv.SHELLS_KEY = key;
+          const child = require('child_process').spawn(app.cmd, { cwd: e.root, shell: true, detached: true, stdio: 'ignore', env: childEnv });
+          child.on('error', () => { /* surfaced to the client via the next reachability poll */ });
+          child.unref();                         // let the dev server outlive this request/server
+        } catch (err) { return send(res, 500, { error: 'launch failed: ' + ((err && err.message) || err) }); }
+      }
+      return send(res, 200, { launched: !already, running: already, url: app.url || '' });
+    }
+
+    // Start this project's Claude session in a new terminal. The command comes from the
+    // registry (session.cmd), defaulting to `claude`; liveness is reported separately by
+    // /api/activity, so there's nothing to poll here.
+    if (req.method === 'POST' && p === '/api/session/launch') {
+      const e = key ? registry.get(key) : null;
+      if (!e) return send(res, 400, { error: 'unknown project' });
+      const cmd = (e.session && e.session.cmd) || 'claude';
+      try { openTerminal(cmd, e.root, 'shells: ' + e.name); }
+      catch (err) { return send(res, 500, { error: 'session launch failed: ' + ((err && err.message) || err) }); }
+      return send(res, 200, { launched: true, cmd, cwd: e.root });
+    }
 
     // --- messages -----------------------------------------------------------
 
@@ -412,9 +509,9 @@ const server = http.createServer(async (req, res) => {
     if (nm) {
       const dir = registry.resolveStateDir(nm[1]);
       if (!dir) return send(res, 404, { error: 'unknown project key: ' + nm[1] });
-      return await runWithStateDir(dir, () => handle(req, res, nm[2] || '/', url));
+      return await runWithStateDir(dir, () => handle(req, res, nm[2] || '/', url, nm[1]));
     }
-    return await handle(req, res, url.pathname, url);
+    return await handle(req, res, url.pathname, url, null);
   } catch (e) {
     // readBody may have already answered (e.g. a 413 for an oversized body) before
     // rejecting — don't write a second response over headers that are already out.
@@ -464,6 +561,18 @@ const PAGE = `<!doctype html>
   .hublink { display: none; text-decoration: none; font-size: 13px; font-weight: 600; color: var(--accent);
     border: 1px solid var(--line); background: var(--bg); padding: 4px 11px; border-radius: 999px; }
   .hublink:hover { border-color: var(--accent); }
+  /* launch/open the project's own app in dev mode — shown only when configured */
+  .appbtn { display: none; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    color: var(--accent-ink); background: var(--accent); border: 1px solid var(--accent);
+    padding: 5px 12px; border-radius: 999px; }
+  .appbtn:hover { filter: brightness(1.06); }
+  .appbtn:disabled { opacity: .6; cursor: default; }
+  /* start the project's Claude session — bordered (the agent), vs filled Open app (the product) */
+  .sessbtn { display: none; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+    color: var(--ink); background: var(--bg); border: 1px solid var(--line); padding: 5px 12px; border-radius: 999px; }
+  .sessbtn:hover { border-color: var(--accent); }
+  .sessbtn:disabled { cursor: default; }
+  .sessbtn.live { color: var(--ok); border-color: var(--ok); }
   .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; align-items: center; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -575,6 +684,8 @@ const PAGE = `<!doctype html>
 <header>
   <a class="hublink" id="hublink" href="/" title="All projects">‹ Hub</a>
   <h1>shells <span class="dim" id="whoami">reference client</span></h1>
+  <button class="sessbtn" id="sessbtn" title="Start this project's Claude session in a new terminal">▶ Launch session</button>
+  <button class="appbtn" id="appbtn" title="Launch this project's app in dev mode and open it">▶ Open app</button>
   <div class="pills">
     <span class="pill" id="pill-activity"><span class="dot" id="dot-activity"></span><span id="txt-activity">…</span></span>
     <span class="pill" id="pill-watcher"><span class="dot" id="dot-watcher"></span><span id="txt-watcher">…</span></span>
@@ -617,6 +728,7 @@ const PAGE = `<!doctype html>
   let allMessages = [];          // last /api/messages snapshot — lets the chat resolve link ids
   let pendingFlash = null;       // a message id to scroll to + flash on the next render
   let activityState = '';        // reported_state — drives the working spinner + typing dots
+  let sessionLive = false;       // watcher link === 'live' — the only non-stale "a session is running now" signal
 
   // --- bruise: never reflow a list under the pointer, never clobber unsaved input.
   // A poll that lands mid-interaction is held; a catch-up render is scheduled for
@@ -860,9 +972,12 @@ const PAGE = `<!doctype html>
       $('#dot-activity').className = 'dot ' + cls + (activityState === 'working' ? ' working' : '');
       $('#txt-activity').textContent = a.reported_state === 'working' && a.task ? 'working · ' + a.task : label;
       updateTyping();
+      updateSessionBtn();
     } catch {}
     try {
       const w = await api('/api/watcher');
+      sessionLive = w.link === 'live';   // the button's liveness gate — see updateSessionBtn
+      updateSessionBtn();
       const [cls, label] = WATCHER_COPY[w.link] || ['warn', w.link || 'unknown'];
       $('#dot-watcher').className = 'dot ' + cls;
       $('#txt-watcher').textContent = label;
@@ -891,6 +1006,68 @@ const PAGE = `<!doctype html>
     try { const r = await fetch('/hub/api/projects'); if (r.ok) { const me = (await r.json()).find(p => p.key === key); if (me) name = me.name; } } catch {}
     if (who) who.textContent = name;
     document.title = 'shells — ' + name;
+    const sb = $('#sessbtn'); if (sb) sb.style.display = 'inline-block';   // session launch is available on any project page
+    updateSessionBtn();
+  }
+
+  // --- "Launch session": start this project's Claude session in a new terminal --
+  // The button reflects liveness from the activity poll: disabled + "Session live" when
+  // a session is already running, otherwise it launches one (the server opens a new
+  // terminal running the project's session command, default claude).
+  function updateSessionBtn() {
+    const sb = $('#sessbtn'); if (!sb || !BASE) return;
+    // "live" means a watcher is heartbeating RIGHT NOW (link === 'live'). Activity's
+    // 'idle' can't be trusted — an idle session emits no events, so a long-dead one
+    // still reads 'idle'; only the watcher beat (which stops when the session dies)
+    // reliably means a session is actually running.
+    sb.classList.toggle('live', sessionLive);
+    if (!sb.dataset.busy) { sb.textContent = sessionLive ? '● Session live' : '▶ Launch session'; sb.disabled = sessionLive; }
+  }
+  async function launchSession() {
+    const sb = $('#sessbtn');
+    sb.disabled = true; sb.dataset.busy = '1'; sb.textContent = 'opening terminal…';
+    try {
+      await api('/api/session/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+      sb.textContent = 'terminal opened ✓ — arm the watcher there';
+    } catch (e) { alert(e.message); }
+    setTimeout(() => { delete sb.dataset.busy; sb.disabled = false; updateSessionBtn(); }, 5000);
+  }
+
+  // --- "Open app": launch this project's own app in dev mode and open it -------
+  // Shown only when the project has an app command configured (registry). Clicking it
+  // opens the app if it's already up, otherwise POSTs a launch (the server spawns the
+  // configured dev command), waits for the URL to come alive, then opens it.
+  async function loadApp() {
+    const btn = $('#appbtn'); if (!btn) return;
+    let st; try { st = await api('/api/app'); } catch { st = null; }
+    if (st && st.configured) {
+      btn.style.display = 'inline-block';
+      if (!btn.dataset.busy) btn.textContent = st.running ? 'Open app ↗' : '▶ Open app';
+      btn.dataset.url = st.url || '';
+    } else {
+      btn.style.display = 'none';
+    }
+  }
+  async function launchApp() {
+    const btn = $('#appbtn');
+    btn.disabled = true; btn.dataset.busy = '1';
+    let st; try { st = await api('/api/app'); } catch { st = null; }
+    if (st && st.running && st.url) { window.open(st.url, '_blank'); btn.disabled = false; delete btn.dataset.busy; btn.textContent = 'Open app ↗'; return; }
+    let r; try { r = await api('/api/app/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' } }); }
+    catch (e) { alert(e.message); btn.disabled = false; delete btn.dataset.busy; return; }
+    const url = r.url;
+    if (!url) { alert('App launched, but no URL is configured to open. Set one with:  shells.js register --app-url <url>'); btn.disabled = false; delete btn.dataset.busy; return; }
+    btn.textContent = 'starting…';
+    const deadline = Date.now() + 25000;
+    (async function poll() {
+      let s; try { s = await api('/api/app'); } catch {}
+      if ((s && s.running) || Date.now() > deadline) {   // open once alive, or give up waiting and open anyway (the tab will retry)
+        window.open(url, '_blank');
+        btn.textContent = 'Open app ↗'; btn.disabled = false; delete btn.dataset.busy;
+        return;
+      }
+      setTimeout(poll, 1000);
+    })();
   }
 
   // --- wiring -----------------------------------------------------------------
@@ -925,9 +1102,14 @@ const PAGE = `<!doctype html>
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#sendform').requestSubmit(); }
   });
 
+  $('#appbtn').addEventListener('click', launchApp);
+  $('#sessbtn').addEventListener('click', launchSession);
+
   syncTabs();
   loadNav();
+  loadApp();
   loadMessages(true).then(loadChat); loadStatus();   // messages first so chat chips resolve on first paint
+  setInterval(loadApp, 4000);   // keep the button label (running vs launch) fresh
   setInterval(() => loadMessages(false), 2000);
   setInterval(loadChat, 2500);
   setInterval(loadStatus, 3000);

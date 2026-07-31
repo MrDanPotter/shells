@@ -38,7 +38,9 @@ const ORIGIN = `http://127.0.0.1:${PORT}`;
 // so order isn't strictly required, but this mirrors real use).
 process.env.SHELLS_HOME = HOME;
 const registry = require('../lib/registry');
-const entry = registry.register({ root: PROJ, name: 'routing test' });
+// app config uses a harmless, fast-exiting command + an unreachable URL, so the launch
+// path is exercised without starting any real dev server.
+const entry = registry.register({ root: PROJ, name: 'routing test', app: { cmd: 'node --version', url: 'http://127.0.0.1:1' } });
 const KEY = entry.key;
 
 async function waitReady(timeoutMs) {
@@ -52,7 +54,9 @@ async function waitReady(timeoutMs) {
 
 (async () => {
   const srv = spawn(process.execPath, [SERVER], {
-    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', SHELLS_HOME: HOME, SHELLS_STATE_DIR: DEFAULT_STATE },
+    // SHELLS_TERMINAL_LAUNCHER makes "Launch session" spawn this harmless command
+    // instead of opening a real terminal window during the test.
+    env: { ...process.env, PORT: String(PORT), HOST: '127.0.0.1', SHELLS_HOME: HOME, SHELLS_STATE_DIR: DEFAULT_STATE, SHELLS_TERMINAL_LAUNCHER: 'node --version' },
     stdio: 'ignore'
   });
 
@@ -115,6 +119,30 @@ async function waitReady(timeoutMs) {
       JSON.stringify(mine.last));
     const hubPage = await fetch(`${ORIGIN}/hub`);
     ok('/hub serves the dashboard page', hubPage.ok && /text\/html/.test(hubPage.headers.get('content-type') || ''), 'status ' + hubPage.status);
+
+    // app launch: a configured project reports its app and can be launched. The command
+    // is a safe no-op (node --version); the URL is unreachable so launch spawns it.
+    const appStat = await (await fetch(`${ORIGIN}/p/${KEY}/api/app`)).json();
+    ok('GET /p/<key>/api/app reports the configured app',
+      appStat.configured === true && appStat.url === 'http://127.0.0.1:1' && appStat.running === false, JSON.stringify(appStat));
+    const launch = await fetch(`${ORIGIN}/p/${KEY}/api/app/launch`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const launchBody = await launch.json();
+    ok('POST /p/<key>/api/app/launch spawns the configured command', launch.ok && launchBody.launched === true, JSON.stringify(launchBody));
+
+    // a project with no app configured reports configured:false and refuses to launch
+    const noapp = registry.register({ root: PROJ + '-noapp', name: 'noapp' });
+    const na = await (await fetch(`${ORIGIN}/p/${noapp.key}/api/app`)).json();
+    ok('unconfigured project reports configured:false', na.configured === false, JSON.stringify(na));
+    const naLaunch = await fetch(`${ORIGIN}/p/${noapp.key}/api/app/launch`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    ok('launch with no app configured -> 400', naLaunch.status === 400, 'status ' + naLaunch.status);
+    registry.unregister(noapp.key);
+
+    // session launch: opens a terminal running the project's session command (default
+    // claude). The real terminal open is stubbed via SHELLS_TERMINAL_LAUNCHER above.
+    const sess = await fetch(`${ORIGIN}/p/${KEY}/api/session/launch`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    const sessBody = await sess.json();
+    ok('POST /p/<key>/api/session/launch launches (default cmd = claude)',
+      sess.ok && sessBody.launched === true && sessBody.cmd === 'claude', JSON.stringify(sessBody));
 
     // the hub is the PRIMARY page: with a project registered, the ROOT serves the fleet.
     // Discriminate on markers unique to each page: the hub's grid vs the client's send

@@ -54,6 +54,7 @@ const USAGE = [
   '  watch [pollMs]               keep-alive inbox watcher',
   '  store <cmd> [args]           new|list|get|respond|read|resolve|reopen',
   '  register [--list]            add this project to the hub registry (or --list it)',
+  '           [--app-cmd C] [--app-url U]   how the hub "Open app" button launches this app',
   '  unregister [dir|key]         remove a project from the hub registry',
   '  hub                          start the shared server for all registered projects',
   '  dev                          start/reuse the hub + launch Claude Code for this project',
@@ -207,12 +208,33 @@ switch (area) {
     if (rest.includes('--list')) {
       const all = registry.list();
       if (!all.length) process.stdout.write('(no projects registered)\n');
-      else for (const p of all) process.stdout.write(`  ${p.key.padEnd(24)} ${p.stateDir}\n`);
+      else for (const p of all) process.stdout.write(`  ${p.key.padEnd(24)} ${p.stateDir}${p.app && p.app.url ? '   app: ' + p.app.url : ''}\n`);
       break;
     }
-    const entry = registry.register({ root: process.cwd(), stateDir: require('./kernel/lib/paths').stateDir() });
+    // --app-cmd "<cmd>" / --app-url "<url>": how the hub's "Open app" button launches
+    // this project's own app in dev mode. Accept "--flag value" and "--flag=value".
+    const flagVal = name => {
+      const i = rest.findIndex(a => a === name);
+      if (i >= 0 && rest[i + 1] != null) return rest[i + 1];
+      const eq = rest.find(a => a.startsWith(name + '='));
+      return eq ? eq.slice(name.length + 1) : undefined;
+    };
+    const root = process.cwd();
+    const appUrl = flagVal('--app-url');
+    let appCmd = flagVal('--app-cmd');
+    if (!appCmd && appUrl) {           // a URL but no command: default to the package's dev script if it has one
+      try { if ((require(path.join(root, 'package.json')).scripts || {}).dev) appCmd = 'npm run dev'; } catch { /* no package.json */ }
+    }
+    const app = (appCmd || appUrl) ? { cmd: appCmd || '', url: appUrl || '' } : undefined;
+    // --session-cmd: the command the hub's "Launch session" button runs in a new
+    // terminal for this project. Defaults to `claude` at launch time when unset.
+    const sessionCmd = flagVal('--session-cmd');
+    const session = sessionCmd ? { cmd: sessionCmd } : undefined;
+    const entry = registry.register({ root, stateDir: require('./kernel/lib/paths').stateDir(), app, session });
     const port = process.env.PORT || 4420;
     process.stdout.write(`registered '${entry.key}' -> ${entry.stateDir}\n`
+      + (entry.app && entry.app.cmd ? `  app:      ${entry.app.cmd}${entry.app.url ? '  ->  ' + entry.app.url : ''}\n` : '')
+      + (entry.session && entry.session.cmd ? `  session:  ${entry.session.cmd}\n` : '')
       + `  embed:    <script src="http://127.0.0.1:${port}/p/${entry.key}/overlay.js"></script>\n`
       + `  full UI:  http://127.0.0.1:${port}/p/${entry.key}/\n`
       + `  registry: ${registry.registryFile()}\n`);
