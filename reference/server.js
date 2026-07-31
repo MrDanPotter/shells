@@ -215,6 +215,36 @@ function saveContext({ text, note, image, selector, createIssue, issue } = {}) {
   return { ok: true, image: imgRel };
 }
 
+// --- the hub fleet view: aggregate every registered project's state -----------
+// The shared server already reads each project's state dir to serve /p/<key>/, so a
+// cross-project overview costs nothing extra: for each registered project, read its
+// activity, open message counts (per kind), open issue count, and last chat line —
+// each INSIDE that project's own state context (runWithStateDir), so one process
+// reports on many projects. It sees the state, not the session's token stream.
+function hubProjects() {
+  return registry.list().map(pr => {
+    const out = {
+      key: pr.key, name: pr.name, stateDir: pr.stateDir,
+      activity: 'unknown', task: null,
+      counts: { decision: 0, task: 0, knowledge: 0, notification: 0 },
+      openIssues: 0, last: null
+    };
+    try {
+      runWithStateDir(pr.stateDir, () => {
+        const a = computeStatus(readActivity());
+        out.activity = a.reported_state || 'unknown';
+        out.task = a.task || null;
+        const open = store.list({});                 // open messages, all kinds
+        for (const k of Object.keys(out.counts)) out.counts[k] = open.filter(m => m.kind === k).length;
+        out.openIssues = issues.list({}).length;     // list() without all -> open only
+        const tail = chat.readChat(1);
+        if (tail.length) { const r = tail[tail.length - 1]; out.last = { role: r.role || 'user', text: r.text, sent_at: r.sent_at }; }
+      });
+    } catch { /* a registered project's state may not exist yet — leave defaults */ }
+    return out;
+  });
+}
+
 // The route table. It reads and writes through the store/chat/issues modules, which
 // resolve WHERE state lives via the ambient state dir (kernel/lib/context.js): in
 // single-project mode that's the env/default; under the hub's /p/<key>/ prefix the
@@ -360,6 +390,24 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
     if (applyCors(req, res)) return;   // answered a CORS preflight — nothing more to do
+
+    // Hub fleet view — cross-project, so NOT under a /p/<key>/ namespace.
+    if (req.method === 'GET' && (url.pathname === '/hub' || url.pathname === '/hub/')) {
+      return send(res, 200, HUB_PAGE, 'text/html');
+    }
+    if (req.method === 'GET' && url.pathname === '/hub/api/projects') {
+      return send(res, 200, hubProjects());
+    }
+
+    // The hub is the PRIMARY page. When any project is registered, the ROOT serves the
+    // fleet index (so you land on the hub and drill into /p/<key>/ children). /hub stays
+    // as an explicit alias. A bare/standalone server with nothing registered still
+    // serves the single-project client at / (handle() below), so the demo and solo
+    // installs are unchanged.
+    if (req.method === 'GET' && url.pathname === '/' && registry.list().length) {
+      return send(res, 200, HUB_PAGE, 'text/html');
+    }
+
     const nm = url.pathname.match(/^\/p\/([a-z0-9-]+)(\/.*)?$/);
     if (nm) {
       const dir = registry.resolveStateDir(nm[1]);
@@ -412,6 +460,10 @@ const PAGE = `<!doctype html>
   }
   header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
   header h1 .dim { color: var(--muted); font-weight: 500; }
+  /* hub nav — shown only under /p/<key>/ (a sub-project), hidden standalone */
+  .hublink { display: none; text-decoration: none; font-size: 13px; font-weight: 600; color: var(--accent);
+    border: 1px solid var(--line); background: var(--bg); padding: 4px 11px; border-radius: 999px; }
+  .hublink:hover { border-color: var(--accent); }
   .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; align-items: center; }
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -521,7 +573,8 @@ const PAGE = `<!doctype html>
 </style>
 
 <header>
-  <h1>shells <span class="dim">reference client</span></h1>
+  <a class="hublink" id="hublink" href="/" title="All projects">‹ Hub</a>
+  <h1>shells <span class="dim" id="whoami">reference client</span></h1>
   <div class="pills">
     <span class="pill" id="pill-activity"><span class="dot" id="dot-activity"></span><span id="txt-activity">…</span></span>
     <span class="pill" id="pill-watcher"><span class="dot" id="dot-watcher"></span><span id="txt-watcher">…</span></span>
@@ -822,6 +875,24 @@ const PAGE = `<!doctype html>
     try { const v = await api('/api/version'); $('#banner-stale').classList.toggle('show', !!v.server_stale); } catch {}
   }
 
+  // --- hub nav: a back-link to the parent hub (only when under /p/<key>/) -------
+  // Under /p/<key>/ this page is a CHILD of the hub, so it shows a "‹ Hub" back-link
+  // and the project's name (a breadcrumb). Served standalone at / there is no hub, so
+  // the nav stays hidden. /hub/api is NOT namespaced -> raw fetch, not api() (which
+  // prefixes BASE).
+  async function loadNav() {
+    const link = $('#hublink'), who = $('#whoami');
+    if (!BASE) { if (link) link.style.display = 'none'; return; }
+    // NOTE: must be an explicit visible value — '' would clear the inline style and
+    // fall back to the stylesheet rule that hides .hublink, keeping it hidden.
+    if (link) link.style.display = 'inline-block';
+    const key = BASE.split('/').pop();
+    let name = key;
+    try { const r = await fetch('/hub/api/projects'); if (r.ok) { const me = (await r.json()).find(p => p.key === key); if (me) name = me.name; } } catch {}
+    if (who) who.textContent = name;
+    document.title = 'shells — ' + name;
+  }
+
   // --- wiring -----------------------------------------------------------------
   document.querySelectorAll('.tab').forEach(t => {
     t.addEventListener('click', () => {
@@ -855,10 +926,119 @@ const PAGE = `<!doctype html>
   });
 
   syncTabs();
+  loadNav();
   loadMessages(true).then(loadChat); loadStatus();   // messages first so chat chips resolve on first paint
   setInterval(() => loadMessages(false), 2000);
   setInterval(loadChat, 2500);
   setInterval(loadStatus, 3000);
+})();
+</script>
+</html>`;
+
+// The hub fleet dashboard: one page listing every registered project with its live
+// status + open-work counts, each card a link into that project's own /p/<key>/ UI.
+// Same discipline as PAGE — all dynamic values reach the DOM via textContent, and it
+// just polls /hub/api/projects.
+const HUB_PAGE = `<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shells — hub</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1b1f24; --muted: #667085;
+    --line: #e6e8ec; --accent: #3b6ef5;
+    --decision: #b5651d; --ok: #2f855a; --warn: #b7791f; --bad: #c53030;
+    --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --muted: #9aa4b2;
+      --line: #262c34; --accent: #5b86f7;
+      --decision: #e0a267; --ok: #6ee7a8; --warn: #e8c37e; --bad: #f28b82;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--panel);
+    border-bottom: 1px solid var(--line); box-shadow: var(--shadow);
+    padding: 14px 22px; display: flex; align-items: baseline; gap: 14px; }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: .2px; }
+  header h1 .dim { color: var(--muted); font-weight: 500; }
+  header .count { color: var(--muted); font-size: 13px; margin-left: auto; }
+  main { max-width: 980px; margin: 0 auto; padding: 22px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; }
+  .empty { grid-column: 1/-1; padding: 40px; text-align: center; color: var(--muted); }
+  .card { display: block; text-decoration: none; color: inherit; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+    padding: 15px 16px; transition: border-color .12s ease, transform .12s ease; }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .chead { display: flex; align-items: center; gap: 10px; }
+  .chead .name { font-weight: 700; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chead .act { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.bad { background: var(--bad); }
+  .dot.working { background: conic-gradient(from 0deg, var(--ok), rgba(47,133,90,.12)); animation: hbwork .8s linear infinite; }
+  @keyframes hbwork { to { transform: rotate(360deg); } }
+  .counts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .c { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600;
+    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg); color: var(--muted); }
+  .c .ic { font-size: 13px; }
+  .c.hot { background: var(--decision); color: #fff; border-color: var(--decision); }
+  .last { margin-top: 12px; font-size: 12.5px; color: var(--muted); overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .last b { color: var(--ink); font-weight: 600; }
+  .key { margin-top: 10px; font: 12px/1 ui-monospace, Menlo, Consolas, monospace; color: var(--accent); }
+</style>
+<header><h1>shells <span class="dim">hub</span></h1><span class="count" id="pcount"></span></header>
+<main id="grid"><div class="empty">Loading…</div></main>
+<script>
+(() => {
+  "use strict";
+  const grid = document.getElementById('grid');
+  const el = (t, c, x) => { const n = document.createElement(t); if (c) n.className = c; if (x != null) n.textContent = x; return n; };
+  const ACT = { working: ['ok','working'], idle: ['warn','idle'], compacting: ['ok','compacting'],
+                stale: ['bad','no signal'], ended: ['bad','ended'], unknown: ['warn','unknown'] };
+  const KMETA = [['decision','🔀'], ['task','✅'], ['knowledge','📖'], ['notification','🔔']];
+  let sig = '';
+  async function load() {
+    let list; try { list = await (await fetch('/hub/api/projects')).json(); } catch { return; }
+    const s = JSON.stringify(list); if (s === sig) return; sig = s;
+    document.getElementById('pcount').textContent = list.length ? (list.length + ' project' + (list.length > 1 ? 's' : '')) : '';
+    grid.textContent = '';
+    if (!list.length) { grid.appendChild(el('div', 'empty', 'No projects registered yet. Run  shells.js register  in a project.')); return; }
+    list.forEach(p => {
+      const card = el('a', 'card'); card.href = '/p/' + p.key + '/';
+      const head = el('div', 'chead');
+      head.appendChild(el('span', 'name', p.name));
+      const [cls, label] = ACT[p.activity] || ACT.unknown;
+      const act = el('span', 'act');
+      act.appendChild(el('span', 'dot ' + cls + (p.activity === 'working' ? ' working' : '')));
+      act.appendChild(el('span', null, p.task ? ('working · ' + p.task) : label));
+      head.appendChild(act);
+      card.appendChild(head);
+      const counts = el('div', 'counts');
+      KMETA.forEach(([k, ic]) => {
+        const c = el('span', 'c' + (k === 'decision' && p.counts.decision > 0 ? ' hot' : ''));
+        c.appendChild(el('span', 'ic', ic)); c.appendChild(el('span', null, String(p.counts[k] || 0)));
+        counts.appendChild(c);
+      });
+      const ci = el('span', 'c'); ci.appendChild(el('span', 'ic', '🧩')); ci.appendChild(el('span', null, String(p.openIssues || 0)));
+      counts.appendChild(ci);
+      card.appendChild(counts);
+      if (p.last) {
+        const l = el('div', 'last');
+        l.appendChild(el('b', null, (p.last.role === 'agent' ? 'agent' : p.last.role === 'external-agent' ? 'external' : 'you') + ': '));
+        l.appendChild(document.createTextNode(p.last.text));
+        card.appendChild(l);
+      }
+      card.appendChild(el('div', 'key', '/p/' + p.key + '/'));
+      grid.appendChild(card);
+    });
+  }
+  load(); setInterval(load, 3000);
 })();
 </script>
 </html>`;
@@ -871,5 +1051,8 @@ server.listen(PORT, HOST, () => {
     const created = seed();
     if (created.length) console.log(`seeded ${created.length} example message(s)`);
   } catch (e) { console.error('seed skipped:', String((e && e.message) || e)); }
-  console.log(`shells reference client -> http://${HOST}:${PORT}  (local only, ^C to stop)`);
+  const nProj = (() => { try { return registry.list().length; } catch { return 0; } })();
+  console.log(nProj
+    ? `shells hub -> http://${HOST}:${PORT}   (${nProj} project(s); each at /p/<key>/)  (local only, ^C to stop)`
+    : `shells -> http://${HOST}:${PORT}   (single-project client; register a project to get the hub)  (local only, ^C to stop)`);
 });

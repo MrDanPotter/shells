@@ -105,6 +105,31 @@ async function waitReady(timeoutMs) {
     } catch (e) { hubOut = (e.stdout || '') + (e.stderr || ''); }
     ok('shells.js hub detects the running server', /already running/.test(hubOut), hubOut.slice(0, 80));
     ok('shells.js hub lists the registered project', hubOut.includes('/p/' + KEY + '/'), hubOut.slice(0, 200));
+
+    // the fleet view aggregates every registered project's state
+    const fleet = await (await fetch(`${ORIGIN}/hub/api/projects`)).json();
+    ok('/hub/api/projects returns the project', Array.isArray(fleet) && fleet.some(p => p.key === KEY),
+      JSON.stringify((fleet || []).map(p => p.key)));
+    const mine = (fleet || []).find(p => p.key === KEY) || {};
+    ok('fleet entry carries counts + last chat', mine.counts && mine.last && mine.last.text === 'hello project',
+      JSON.stringify(mine.last));
+    const hubPage = await fetch(`${ORIGIN}/hub`);
+    ok('/hub serves the dashboard page', hubPage.ok && /text\/html/.test(hubPage.headers.get('content-type') || ''), 'status ' + hubPage.status);
+
+    // the hub is the PRIMARY page: with a project registered, the ROOT serves the fleet.
+    // Discriminate on markers unique to each page: the hub's grid vs the client's send
+    // form (both pages reference /hub/api/projects, so that string can't tell them apart).
+    const rootHub = await (await fetch(`${ORIGIN}/`)).text();
+    ok('/ serves the hub when a project is registered',
+      /id="grid"/.test(rootHub) && !/id="sendform"/.test(rootHub), rootHub.slice(0, 80));
+
+    // ...and falls back to the single-project client when the registry is empty
+    // (backward compat for the standalone demo + solo installs). Done last — it drops
+    // the registration the KEY-dependent checks above relied on.
+    registry.unregister(KEY);
+    const rootSolo = await (await fetch(`${ORIGIN}/`)).text();
+    ok('/ falls back to the single-project client when registry is empty',
+      /id="sendform"/.test(rootSolo) && !/id="grid"/.test(rootSolo), rootSolo.slice(0, 80));
   } finally {
     // Wait for the child to fully exit BEFORE we leave — killing it and calling
     // process.exit() in the same tick trips a libuv handle-teardown assertion on
